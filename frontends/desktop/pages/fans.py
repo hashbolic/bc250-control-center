@@ -69,6 +69,7 @@ from bc250cc.infrastructure.system_fan_control import (
     policy_digest,
     system_fan_control_owns_fan,
 )
+from bc250cc.infrastructure.reference_fan_control import read_reference_fan_status
 from bc250cc.platform.init.services import detect_init_manager
 
 from ..components.async_tools import AsyncRefresh, BackgroundExecutor
@@ -2102,6 +2103,7 @@ class FansPage(QWidget):
         self._deck_sync_queued = False
         self._fan_root_config: dict = {}
         self._system_fan_control: dict = {}
+        self._reference_fan_state: dict = {}
         self._system_fan_sync_error = ""
         self._system_fan_busy = False
         self._rpm_session: tuple[int, int] | None = None
@@ -2182,6 +2184,7 @@ class FansPage(QWidget):
         # writable pill gave the right column a header and nothing else.
         self.cooling_card.drop_header()
         self.cooling_card.body.addWidget(self.overview_card)
+        self.cooling_card.body.addWidget(self._build_reference_fan_panel())
         self.cooling_card.body.addWidget(self._build_system_control_panel())
         driver_panel, driver_box = subpanel()
         self.driver_panel = driver_panel
@@ -2791,6 +2794,54 @@ class FansPage(QWidget):
         self.apply_curve_button.clicked.connect(self.apply_curve_now)
         self.curve_action_bar = _action_bar(actions)
         return page
+
+    def _build_reference_fan_panel(self) -> QFrame:
+        """Compact status for the fixed Hashbolic dual-fan reference layout."""
+        panel, box = subpanel("Reference cooling")
+        self.reference_fan_panel = panel
+
+        self.reference_main_reading = Reading("PWM2 · CPU/GPU main")
+        self.reference_main_reading.set_value("--")
+        box.addWidget(self.reference_main_reading)
+
+        self.reference_backplate_reading = Reading("PWM3 · Backplate")
+        self.reference_backplate_reading.set_value("--")
+        box.addWidget(_ruled(self.reference_backplate_reading))
+
+        self.reference_fan_detail = QLabel(tr(
+            "PWM2 follows max(CPU, GPU). PWM3 follows max(GDDR6 hotspot, GPU VRM)."
+        ))
+        self.reference_fan_detail.setProperty("fanStageNote", True)
+        self.reference_fan_detail.setWordWrap(True)
+        box.addWidget(self.reference_fan_detail)
+        return panel
+
+    def _render_reference_fans(self) -> None:
+        state = self._reference_fan_state if isinstance(self._reference_fan_state, dict) else {}
+        main = state.get("main") if isinstance(state.get("main"), dict) else {}
+        back = state.get("backplate") if isinstance(state.get("backplate"), dict) else {}
+
+        if state.get("main_running"):
+            source = str(main.get("sensor") or main.get("source") or "--").upper()
+            temp = main.get("temperature")
+            percent = main.get("percent")
+            label = f"{percent if percent is not None else '--'} %"
+            if temp is not None:
+                label += f" · {source} {float(temp):.1f} °C"
+            self.reference_main_reading.set_value(label)
+        else:
+            self.reference_main_reading.set_value(tr("Inactive"))
+
+        if state.get("backplate_running"):
+            source = str(back.get("sensor") or "--").replace("_", " ").upper()
+            temp = back.get("temperature")
+            percent = back.get("percent")
+            label = f"{percent if percent is not None else '--'} %"
+            if temp is not None:
+                label += f" · {source} {float(temp):.1f} °C"
+            self.reference_backplate_reading.set_value(label)
+        else:
+            self.reference_backplate_reading.set_value(tr("Inactive"))
 
     def _build_system_control_panel(self) -> QFrame:
         """Whether a root service follows the fan from boot (GitHub #15).
@@ -4409,12 +4460,18 @@ class FansPage(QWidget):
             sensors = _dict(_dict(self._state_cache.realtime_metrics()).get("sensors"))
         except Exception:  # auxiliary readings only enrich the detail rows
             sensors = {}
+        reference = {}
+        try:
+            reference = read_reference_fan_status()
+        except Exception:
+            reference = {}
         return {
             "fans": self._state_cache.fans(),
             "performance": self._state_cache.performance(),
             "gpu": self._state_cache.gpu(),
             "system": system if isinstance(system, dict) else {},
             "sensors": sensors,
+            "reference": reference if isinstance(reference, dict) else {},
         }
 
     def refresh(self) -> None:
@@ -4444,8 +4501,10 @@ class FansPage(QWidget):
         self.gpu_state = _dict(data.get("gpu"))
         self._system_fan_control = _dict(data.get("system"))
         self.sensor_state = _dict(data.get("sensors"))
+        self._reference_fan_state = _dict(data.get("reference"))
         self._refresh_error = ""
         self._apply_state()
+        self._render_reference_fans()
         self._render_system_control()
         if self._updates_active:
             self._maybe_apply_curve()
