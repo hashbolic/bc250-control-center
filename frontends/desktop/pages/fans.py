@@ -3459,7 +3459,172 @@ class FansPage(QWidget):
         self.reference_fan_detail.setProperty("fanStageNote", True)
         self.reference_fan_detail.setWordWrap(True)
         box.addWidget(self.reference_fan_detail)
+
+        actions = QHBoxLayout()
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(7)
+        self.edit_main_curve_button = QPushButton(tr("Edit main curve"))
+        self.edit_main_curve_button.setProperty("compactAction", True)
+        self.edit_main_curve_button.clicked.connect(
+            lambda: self._open_reference_curve_editor(2)
+        )
+        self.edit_backplate_curve_button = QPushButton(tr("Edit backplate curve"))
+        self.edit_backplate_curve_button.setProperty("compactAction", True)
+        self.edit_backplate_curve_button.clicked.connect(
+            lambda: self._open_reference_curve_editor(3)
+        )
+        actions.addWidget(self.edit_main_curve_button, 1)
+        actions.addWidget(self.edit_backplate_curve_button, 1)
+        box.addLayout(actions)
         return panel
+
+    def _reference_policy_for_pwm(self, pwm: int) -> tuple[dict, float | None, float | None, str]:
+        state = self._reference_fan_state if isinstance(self._reference_fan_state, dict) else {}
+        if int(pwm) == 2:
+            status = state.get("main") if isinstance(state.get("main"), dict) else {}
+            policy = self._system_fan_control.get("policy")
+            policy = dict(policy) if isinstance(policy, dict) else {}
+            if policy.get("mode") != "curve" or _integer(policy.get("pwm"), -1) != 2:
+                policy = {
+                    "schema": 1,
+                    "mode": "curve",
+                    "pwm": 2,
+                    "points": [list(point) for point in REFERENCE_MAIN_CURVE],
+                    "failsafe_percent": 100,
+                    "hysteresis_c": 1.5,
+                    "deadband_percent": 2,
+                    "max_down_step_percent": 10,
+                    "sensor_timeout_seconds": 10.0,
+                    "critical_c": {"gpu": 90.0, "cpu": 90.0, "vrm": 105.0, "board": 90.0},
+                    "offsets_c": {"gpu": 0.0, "cpu": 0.0, "vrm": 0.0, "board": 0.0},
+                }
+            return (
+                policy,
+                _finite_number(status.get("temperature")),
+                _finite_number(status.get("percent")),
+                "max(CPU, GPU)",
+            )
+
+        status = state.get("backplate") if isinstance(state.get("backplate"), dict) else {}
+        curve = status.get("curve")
+        if not isinstance(curve, list):
+            curve = [list(point) for point in REFERENCE_BACKPLATE_CURVE]
+        policy = {
+            "schema": 1,
+            "pwm": 3,
+            "points": curve,
+            "failsafe_percent": _integer(status.get("failsafe_percent"), 100),
+            "hysteresis_c": _finite_number(status.get("hysteresis_c")) or 1.5,
+            "deadband_percent": _integer(status.get("deadband_percent"), 2),
+            "max_down_step_percent": _integer(status.get("max_down_step_percent"), 10),
+            "sensor_timeout_seconds": _finite_number(status.get("sensor_timeout_seconds")) or 15.0,
+            "critical_c": _finite_number(status.get("critical_c")) or 95.0,
+        }
+        return (
+            policy,
+            _finite_number(status.get("temperature")),
+            _finite_number(status.get("percent")),
+            "max(GDDR6 hotspot, GPU VRM)",
+        )
+
+    def _open_reference_curve_editor(self, pwm: int) -> None:
+        policy, temperature, duty, source = self._reference_policy_for_pwm(pwm)
+        title = (
+            "CPU/GPU main fan curve"
+            if int(pwm) == 2
+            else "Backplate fan curve"
+        )
+        dialog = ReferenceCurveDialog(
+            pwm=int(pwm),
+            title=title,
+            source=source,
+            policy=policy,
+            live_temperature=temperature,
+            actual_duty=duty,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._save_reference_curve(int(pwm), dialog.policy())
+
+    def _save_reference_curve(self, pwm: int, policy: dict) -> None:
+        if self._system_fan_busy:
+            return
+        self._system_fan_busy = True
+        if hasattr(self, "edit_main_curve_button"):
+            self.edit_main_curve_button.setEnabled(False)
+            self.edit_backplate_curve_button.setEnabled(False)
+
+        def operation() -> object:
+            if int(pwm) == 3:
+                writer = getattr(self.controller, "sincronizar_control_fan_backplate", None)
+                if not callable(writer):
+                    raise RuntimeError(
+                        "The installed fan backend is too old for backplate curve editing."
+                    )
+                return writer(policy)
+
+            if self.settings_service is None:
+                raise RuntimeError("FansPage requires a settings service to save preferences")
+            points = [
+                {"temperature": int(item[0]), "speed": int(item[1])}
+                for item in policy.get("points", [])
+            ]
+            curve = {
+                "enabled": True,
+                "edit_enabled": True,
+                "pwm": 2,
+                "point_count": len(points),
+                "points": points,
+                "preset": "custom",
+                "last_pwm_text": self._last_pwm_text,
+            }
+            payload = {
+                "fan_curve": curve,
+                "fan_preset": {"enabled": False, "preset": "", "percent": 0, "pwm": 2},
+                "fan_daemon_failsafe_percent": int(policy["failsafe_percent"]),
+                "fan_daemon_hysteresis_c": float(policy["hysteresis_c"]),
+                "fan_daemon_duty_deadband_percent": int(policy["deadband_percent"]),
+                "fan_daemon_max_down_step_percent": int(policy["max_down_step_percent"]),
+                "fan_daemon_sensor_timeout_seconds": float(policy["sensor_timeout_seconds"]),
+                "fan_daemon_critical_temperatures_c": dict(policy["critical_c"]),
+            }
+            self.settings_service.save_local_config(payload)
+            writer = getattr(self.controller, "sincronizar_control_fan_sistema", None)
+            if not callable(writer):
+                raise RuntimeError("The installed fan backend cannot sync the system fan policy.")
+            return writer(policy)
+
+        def done(_result: object) -> None:
+            self._system_fan_busy = False
+            if hasattr(self, "edit_main_curve_button"):
+                self.edit_main_curve_button.setEnabled(True)
+                self.edit_backplate_curve_button.setEnabled(True)
+            if int(pwm) == 2:
+                self._curve_config_loaded = False
+                self._state_cache.invalidate("config")
+                self._load_curve_config()
+            self._manual_refresh()
+            show_toast(
+                self,
+                tr("Fan curve saved"),
+                tr("The root cooling service will use the new curve from now on."),
+                tone="green",
+            )
+
+        def failed(message: str) -> None:
+            self._system_fan_busy = False
+            if hasattr(self, "edit_main_curve_button"):
+                self.edit_main_curve_button.setEnabled(True)
+                self.edit_backplate_curve_button.setEnabled(True)
+            self._show_error("Could not save fan curve", message)
+
+        self._background.start(
+            f"reference-curve-save:{int(pwm)}",
+            operation,
+            done,
+            failed,
+        )
 
     def _render_reference_fans(self) -> None:
         state = self._reference_fan_state if isinstance(self._reference_fan_state, dict) else {}
