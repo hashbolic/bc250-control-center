@@ -109,7 +109,7 @@ from ..core.state import state_cache_for
 from ..i18n import localize_widget_tree, tr, tr_format
 from ..theme import COLORS, application_stylesheet, scale_stylesheet
 
-VISIBLE_PWM_ORDER = (2, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+VISIBLE_PWM_ORDER = (2, 3)
 #: Below this duty a manual speed asks before it is written: the board can
 #: overheat under load. Anything above is applied on the click.
 LOW_DUTY_CONFIRM_PERCENT = 30
@@ -1211,7 +1211,7 @@ class CurvePoint(QFrame):
 
 
 class FanCurveScale(QWidget):
-    """Paint the daemon's discrete response against measured axes.
+    """Paint and edit the daemon's discrete response against measured axes.
 
     The temperature axis follows the curve instead of a fixed 30–95 °C
     window, so eight points spread across the plot instead of piling into one
@@ -1219,6 +1219,8 @@ class FanCurveScale(QWidget):
     numbered the way the editor below numbers it, and the pointer reads the
     exact step it is over, so a curve with many points stays legible.
     """
+
+    point_moved = pyqtSignal(int, int, int)
 
     MIN_TEMPERATURE = 30.0
     MAX_TEMPERATURE = 95.0
@@ -1237,6 +1239,7 @@ class FanCurveScale(QWidget):
         self.enabled = False
         self.compact = False
         self.hovered: int | None = None
+        self.dragged: int | None = None
         self._plot = QRectF()
         self.setMinimumHeight(self.MINIMUM_HEIGHT)
         self.setMouseTracking(True)
@@ -1305,16 +1308,72 @@ class FanCurveScale(QWidget):
                 best, best_distance = index, distance
         return best
 
+    def _values_for_position(self, position: QPointF, index: int) -> tuple[int, int]:
+        """Map a pointer position back to a valid monotonic curve point."""
+        if self._plot.isEmpty():
+            return self.points[index]
+        low, high = self.temperature_range()
+        x = max(self._plot.left(), min(self._plot.right(), position.x()))
+        y = max(self._plot.top(), min(self._plot.bottom(), position.y()))
+        temperature = round(low + ((x - self._plot.left()) / self._plot.width()) * (high - low))
+        duty = round(((self._plot.bottom() - y) / self._plot.height()) * 100)
+        temperature = max(int(self.MIN_TEMPERATURE), min(int(self.MAX_TEMPERATURE), int(temperature)))
+        duty = max(0, min(100, int(duty)))
+
+        # Curve thresholds must remain strictly increasing. CoolerControl-style
+        # dragging feels natural when a point stops at its neighbour instead
+        # of invalidating the whole curve after the mouse is released.
+        if index > 0:
+            temperature = max(temperature, int(self.points[index - 1][0]) + 1)
+        if index + 1 < len(self.points):
+            temperature = min(temperature, int(self.points[index + 1][0]) - 1)
+        return temperature, duty
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if event.button() == Qt.MouseButton.LeftButton:
+            index = self.point_at(event.position())
+            if index is not None:
+                self.dragged = index
+                self.hovered = index
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if self.dragged is not None:
+            temperature, duty = self._values_for_position(event.position(), self.dragged)
+            if (temperature, duty) != self.points[self.dragged]:
+                self.points[self.dragged] = (temperature, duty)
+                self.point_moved.emit(self.dragged, temperature, duty)
+                self.update()
+            event.accept()
+            return
         hovered = self.point_at(event.position())
         if hovered != self.hovered:
             self.hovered = hovered
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor if hovered is not None
+                else Qt.CursorShape.ArrowCursor
+            )
             self.update()
         super().mouseMoveEvent(event)
 
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if event.button() == Qt.MouseButton.LeftButton and self.dragged is not None:
+            self.dragged = None
+            self.setCursor(
+                Qt.CursorShape.OpenHandCursor if self.hovered is not None
+                else Qt.CursorShape.ArrowCursor
+            )
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API name
-        if self.hovered is not None:
+        if self.dragged is None:
             self.hovered = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
             self.update()
         super().leaveEvent(event)
 
@@ -2716,6 +2775,7 @@ class FansPage(QWidget):
         plot_layout.setContentsMargins(10, 9, 10, 9)
         plot_layout.setSpacing(0)
         self.curve_plot = FanCurvePlot()
+        self.curve_plot.scale.point_moved.connect(self._curve_plot_point_moved)
         plot_layout.addWidget(self.curve_plot)
         root.addWidget(self.curve_plot_panel)
 
@@ -3688,6 +3748,20 @@ class FansPage(QWidget):
 
         self._persist_curve(on_success=saved)
 
+    def _curve_plot_point_moved(self, index: int, temperature: int, speed: int) -> None:
+        """Mirror an interactive graph drag into the numeric point editor."""
+        if self._curve_loading or not 0 <= int(index) < len(self.curve_points):
+            return
+        point = self.curve_points[int(index)]
+        point.set_values(int(temperature), int(speed))
+        self._curve_preset = "custom"
+        self.curve_preset_group.setExclusive(False)
+        for button in self.curve_preset_buttons:
+            button.setChecked(False)
+        self.curve_preset_group.setExclusive(True)
+        self._curve_dirty = True
+        self._update_curve_summary()
+
     def _curve_values_changed(self) -> None:
         if self._curve_loading:
             return
@@ -4530,7 +4604,11 @@ class FansPage(QWidget):
         entries: list[tuple[str, int]] = []
         for fan in fans:
             index = _integer(fan.get("index"), 0)
-            label = fan.get("label") or f"Fan {index}"
+            reference_labels = {
+                2: tr("CPU/GPU main fan"),
+                3: tr("Backplate / GDDR6"),
+            }
+            label = reference_labels.get(index) or fan.get("label") or f"Fan {index}"
             entries.append((f"PWM {index} · {label}", index))
         self.channel_combo.blockSignals(True)
         # The channel list is hardware; it does not change between ticks. Only
@@ -4822,6 +4900,14 @@ class FansPage(QWidget):
 
     def _fan_writable_for_pwm(self, pwm: object) -> bool:
         expected = _integer(pwm, -1)
+        if (
+            expected == 3
+            and isinstance(self._reference_fan_state, dict)
+            and self._reference_fan_state.get("backplate_running")
+        ):
+            # PWM3 has its own persistent max(GDDR6 hotspot, GPU VRM)
+            # controller. A one-off desktop write would only race that service.
+            return False
         fan = next(
             (item for item in self._visible_fans() if _integer(item.get("index"), -1) == expected),
             {},
