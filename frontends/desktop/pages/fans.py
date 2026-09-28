@@ -121,6 +121,8 @@ CURVE_PRESETS = {
     "balanced": ((50, 60), (65, 85), (72, 100)),
     "aggressive": ((45, 70), (60, 90), (68, 100)),
 }
+REFERENCE_MAIN_CURVE = ((0, 20), (50, 30), (60, 40), (70, 50), (75, 65), (85, 100))
+REFERENCE_BACKPLATE_CURVE = ((0, 25), (50, 35), (55, 45), (60, 60), (65, 75), (70, 90), (75, 100))
 
 _ICON_DIR = (Path(__file__).resolve().parents[1] / "theme" / "icons").as_posix()
 
@@ -1720,6 +1722,457 @@ class FanCurvePlot(QWidget):
             self.target_pwm,
         )
         self.setAccessibleDescription(self.live_text())
+
+
+
+class ReferenceCurveDialog(QDialog):
+    """CoolerControl-inspired graph editor for one reference fan policy.
+
+    This is an independent PyQt implementation: the interaction model mirrors
+    the useful parts of CoolerControl (drag points, exact point rows, axis
+    range, copy/paste, live temperature/duty overlays and response controls)
+    without importing or copying its GPL UI code into this MIT project.
+    """
+
+    def __init__(
+        self,
+        *,
+        pwm: int,
+        title: str,
+        source: str,
+        policy: dict,
+        live_temperature: float | None,
+        actual_duty: float | None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.pwm = int(pwm)
+        self.source = str(source)
+        self._policy = dict(policy or {})
+        self._selected_point: int | None = None
+        self._loading = False
+        self._point_rows: list[CurvePoint] = []
+        self.setWindowTitle(tr(title))
+        self.setMinimumSize(860, 650)
+        self.resize(980, 760)
+        self.setModal(True)
+        self.setStyleSheet(application_stylesheet())
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(18, 16, 18, 16)
+        root.setSpacing(12)
+
+        heading = QHBoxLayout()
+        copy = QVBoxLayout()
+        name = QLabel(tr(title))
+        name.setProperty("coolingHeading", True)
+        copy.addWidget(name)
+        source_label = QLabel(tr_format("Temperature source: {source}", source=self.source))
+        source_label.setProperty("fanStageNote", True)
+        copy.addWidget(source_label)
+        heading.addLayout(copy, 1)
+        badge = FanStatusChip(f"PWM {self.pwm}", "blue")
+        badge.setWordWrap(False)
+        heading.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+        root.addLayout(heading)
+
+        graph_panel = QFrame()
+        graph_panel.setProperty("curveStage", True)
+        graph_layout = QVBoxLayout(graph_panel)
+        graph_layout.setContentsMargins(10, 8, 10, 8)
+        graph_layout.setSpacing(6)
+        self.graph = FanCurvePlot(graph_panel)
+        self.graph.set_enabled(True)
+        self.graph.set_target(self.pwm)
+        self.graph.set_live(live_temperature, None, source)
+        self.graph.set_actual_duty(actual_duty)
+        self.graph.scale.point_moved.connect(self._graph_point_moved)
+        self.graph.scale.point_added.connect(self._graph_point_added)
+        self.graph.scale.point_removed.connect(self._graph_point_removed)
+        self.graph.scale.point_selected.connect(self._graph_point_selected)
+        graph_layout.addWidget(self.graph, 1)
+        hint = QLabel(tr(
+            "Drag points. Double-click empty graph space to add a point. "
+            "Right-click a point or press Delete to remove it."
+        ))
+        hint.setProperty("fanStageNote", True)
+        hint.setWordWrap(True)
+        graph_layout.addWidget(hint)
+        root.addWidget(graph_panel, 1)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(7)
+        self.add_button = QPushButton(tr("Add point"))
+        self.remove_button = QPushButton(tr("Remove point"))
+        self.copy_button = QPushButton(tr("Copy points"))
+        self.paste_button = QPushButton(tr("Paste points"))
+        self.reset_button = QPushButton(tr("Reset"))
+        for button in (
+            self.add_button, self.remove_button, self.copy_button,
+            self.paste_button, self.reset_button,
+        ):
+            button.setProperty("compactAction", True)
+            toolbar.addWidget(button)
+        toolbar.addStretch(1)
+
+        axis_label = QLabel(tr("Graph range"))
+        axis_label.setProperty("fanStageNote", True)
+        toolbar.addWidget(axis_label)
+        self.axis_min = QSpinBox()
+        self.axis_min.setRange(0, 110)
+        self.axis_min.setSuffix(" °C")
+        self.axis_min.setFixedWidth(88)
+        self.axis_max = QSpinBox()
+        self.axis_max.setRange(10, 120)
+        self.axis_max.setSuffix(" °C")
+        self.axis_max.setFixedWidth(88)
+        toolbar.addWidget(self.axis_min)
+        toolbar.addWidget(self.axis_max)
+        root.addLayout(toolbar)
+
+        self.add_button.clicked.connect(self._add_point)
+        self.remove_button.clicked.connect(self._remove_point)
+        self.copy_button.clicked.connect(self._copy_points)
+        self.paste_button.clicked.connect(self._paste_points)
+        self.reset_button.clicked.connect(self._reset_points)
+        self.axis_min.valueChanged.connect(self._axis_changed)
+        self.axis_max.valueChanged.connect(self._axis_changed)
+
+        points_holder = QScrollArea()
+        points_holder.setWidgetResizable(True)
+        points_holder.setFrameShape(QFrame.Shape.NoFrame)
+        points_widget = QWidget()
+        self.points_layout = QVBoxLayout(points_widget)
+        self.points_layout.setContentsMargins(0, 0, 0, 0)
+        self.points_layout.setSpacing(6)
+        points_holder.setWidget(points_widget)
+        points_holder.setMaximumHeight(230)
+        root.addWidget(points_holder)
+
+        response = QFrame()
+        response.setProperty("curveControlPanel", True)
+        response_grid = QGridLayout(response)
+        response_grid.setContentsMargins(10, 9, 10, 9)
+        response_grid.setHorizontalSpacing(10)
+        response_grid.setVerticalSpacing(7)
+
+        def spin(label: str, widget, row: int, column: int) -> None:
+            holder = QWidget()
+            box = QVBoxLayout(holder)
+            box.setContentsMargins(0, 0, 0, 0)
+            box.setSpacing(2)
+            name = QLabel(tr(label))
+            name.setProperty("fieldHint", True)
+            box.addWidget(name)
+            box.addWidget(widget)
+            response_grid.addWidget(holder, row, column)
+
+        self.hysteresis = QDoubleSpinBox()
+        self.hysteresis.setRange(0.0, 10.0)
+        self.hysteresis.setSingleStep(0.5)
+        self.hysteresis.setDecimals(1)
+        self.hysteresis.setSuffix(" °C")
+        self.deadband = QSpinBox()
+        self.deadband.setRange(0, 20)
+        self.deadband.setSuffix(" %")
+        self.max_down = QSpinBox()
+        self.max_down.setRange(1, 100)
+        self.max_down.setSuffix(" %")
+        self.sensor_timeout = QSpinBox()
+        self.sensor_timeout.setRange(3, 300)
+        self.sensor_timeout.setSuffix(" s")
+        self.critical = QDoubleSpinBox()
+        self.critical.setRange(50.0, 125.0)
+        self.critical.setSingleStep(1.0)
+        self.critical.setDecimals(1)
+        self.critical.setSuffix(" °C")
+        self.failsafe = QSpinBox()
+        self.failsafe.setRange(40, 100)
+        self.failsafe.setSuffix(" %")
+        spin("Hysteresis", self.hysteresis, 0, 0)
+        spin("Duty deadband", self.deadband, 0, 1)
+        spin("Max downward step", self.max_down, 0, 2)
+        spin("Sensor timeout", self.sensor_timeout, 1, 0)
+        spin("Critical temperature", self.critical, 1, 1)
+        spin("Failsafe duty", self.failsafe, 1, 2)
+        root.addWidget(response)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = QPushButton(tr("Cancel"))
+        cancel.clicked.connect(self.reject)
+        save = QPushButton(tr("Save curve"))
+        save.setProperty("primaryAction", True)
+        save.clicked.connect(self._accept_if_valid)
+        actions.addWidget(cancel)
+        actions.addWidget(save)
+        root.addLayout(actions)
+
+        self._load_policy()
+
+    def _default_points(self) -> list[tuple[int, int]]:
+        source = REFERENCE_MAIN_CURVE if self.pwm == 2 else REFERENCE_BACKPLATE_CURVE
+        return [tuple(map(int, point)) for point in source]
+
+    @staticmethod
+    def _repair_points(values: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        cleaned = sorted(
+            (
+                max(0, min(120, int(temp))),
+                max(0, min(100, int(speed))),
+            )
+            for temp, speed in values
+        )
+        result: list[tuple[int, int]] = []
+        for temperature, speed in cleaned[:8]:
+            minimum = result[-1][0] + 1 if result else 0
+            temperature = max(minimum, temperature)
+            if temperature > 120:
+                break
+            result.append((temperature, speed))
+        return result
+
+    def _policy_points(self) -> list[tuple[int, int]]:
+        raw = self._policy.get("points")
+        if not isinstance(raw, list):
+            raw = self._policy.get("curve")
+        values: list[tuple[int, int]] = []
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    try:
+                        values.append((int(item[0]), int(item[1])))
+                    except (TypeError, ValueError):
+                        continue
+        repaired = self._repair_points(values)
+        return repaired if 3 <= len(repaired) <= 8 else self._default_points()
+
+    def _load_policy(self) -> None:
+        points = self._policy_points()
+        self._set_points(points)
+        low = max(0, min(point[0] for point in points) - 10)
+        high = min(120, max(point[0] for point in points) + 10)
+        settings = application_settings()
+        low = _integer(settings.value(f"fans/curve_editor_{self.pwm}/temp_min", low), low)
+        high = _integer(settings.value(f"fans/curve_editor_{self.pwm}/temp_max", high), high)
+        if high <= low:
+            high = min(120, low + 10)
+        self.axis_min.blockSignals(True)
+        self.axis_max.blockSignals(True)
+        self.axis_min.setValue(low)
+        self.axis_max.setValue(high)
+        self.axis_min.blockSignals(False)
+        self.axis_max.blockSignals(False)
+        self.graph.set_axis_range(low, high)
+
+        critical = self._policy.get("critical_c", 90.0 if self.pwm == 2 else 95.0)
+        if isinstance(critical, dict):
+            candidates = [
+                value for key, value in critical.items()
+                if key in {"cpu", "gpu"} and isinstance(value, (int, float))
+            ]
+            critical = min(candidates) if candidates else 90.0
+        self.hysteresis.setValue(float(self._policy.get("hysteresis_c", 1.5)))
+        self.deadband.setValue(_integer(self._policy.get("deadband_percent"), 2))
+        self.max_down.setValue(_integer(self._policy.get("max_down_step_percent"), 10))
+        self.sensor_timeout.setValue(_integer(self._policy.get("sensor_timeout_seconds"), 15))
+        self.critical.setValue(float(critical))
+        self.failsafe.setValue(_integer(self._policy.get("failsafe_percent"), 100))
+        self._refresh_buttons()
+
+    def _set_points(self, values: list[tuple[int, int]], *, selected: int | None = None) -> None:
+        values = self._repair_points(values)
+        if len(values) < 3:
+            values = self._default_points()
+        self._loading = True
+        for row in self._point_rows:
+            row.setParent(None)
+            row.deleteLater()
+        self._point_rows = []
+        for index, (temperature, speed) in enumerate(values, start=1):
+            row = CurvePoint(tr_format("Point {index}", index=index), temperature, speed)
+            row.temperature.setRange(0, 120)
+            row.changed.connect(self._rows_changed)
+            self.points_layout.addWidget(row)
+            self._point_rows.append(row)
+        self._loading = False
+        self._selected_point = (
+            max(0, min(len(values) - 1, selected))
+            if selected is not None and values else None
+        )
+        self.graph.set_curve(values)
+        self.graph.scale.selected = self._selected_point
+        self.graph.scale.update()
+        self._refresh_buttons()
+
+    def _points(self) -> list[tuple[int, int]]:
+        return [row.values() for row in self._point_rows]
+
+    def _rows_changed(self) -> None:
+        if self._loading:
+            return
+        values = self._repair_points(self._points())
+        self._set_points(values, selected=self._selected_point)
+
+    def _graph_point_selected(self, index: int) -> None:
+        self._selected_point = int(index)
+        self.graph.scale.selected = self._selected_point
+        self.graph.scale.update()
+        self._refresh_buttons()
+
+    def _graph_point_moved(self, index: int, temperature: int, speed: int) -> None:
+        if not 0 <= int(index) < len(self._point_rows):
+            return
+        self._point_rows[int(index)].set_values(int(temperature), int(speed))
+        self.graph.points = self._points()
+        self.graph._render()
+
+    def _graph_point_added(self, temperature: int, speed: int) -> None:
+        if len(self._point_rows) >= 8:
+            return
+        values = self._points()
+        used = {item[0] for item in values}
+        candidate = int(temperature)
+        if candidate in used:
+            for distance in range(1, 121):
+                choices = (candidate - distance, candidate + distance)
+                candidate = next(
+                    (value for value in choices if 0 <= value <= 120 and value not in used),
+                    candidate,
+                )
+                if candidate not in used:
+                    break
+        values.append((candidate, int(speed)))
+        values = self._repair_points(values)
+        selected = next(
+            (i for i, item in enumerate(values) if item[0] == candidate),
+            len(values) - 1,
+        )
+        self._set_points(values, selected=selected)
+
+    def _graph_point_removed(self, index: int) -> None:
+        if len(self._point_rows) <= 3:
+            return
+        values = self._points()
+        del values[int(index)]
+        self._set_points(values, selected=min(int(index), len(values) - 1))
+
+    def _add_point(self) -> None:
+        if len(self._point_rows) >= 8:
+            return
+        values = sorted(self._points())
+        candidates: list[tuple[int, int]] = []
+        boundaries = [(0, values[0][0]), *zip(
+            [item[0] for item in values],
+            [item[0] for item in values][1:],
+        ), (values[-1][0], 120)]
+        for lower, upper in boundaries:
+            if upper - lower > 1:
+                candidates.append((upper - lower, lower + (upper - lower) // 2))
+        temperature = max(candidates)[1] if candidates else min(120, values[-1][0] + 1)
+        speed = max((s for t, s in values if t <= temperature), default=values[-1][1])
+        self._graph_point_added(temperature, speed)
+
+    def _remove_point(self) -> None:
+        if len(self._point_rows) <= 3:
+            return
+        index = self._selected_point
+        if index is None:
+            index = len(self._point_rows) - 1
+        self._graph_point_removed(index)
+
+    def _copy_points(self) -> None:
+        QApplication.clipboard().setText(json.dumps({"points": self._points()}))
+
+    def _paste_points(self) -> None:
+        try:
+            payload = json.loads(QApplication.clipboard().text())
+            raw = payload.get("points") if isinstance(payload, dict) else payload
+            values = [
+                (int(item[0]), int(item[1]))
+                for item in raw
+                if isinstance(item, (list, tuple)) and len(item) == 2
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        values = self._repair_points(values)
+        if 3 <= len(values) <= 8:
+            self._set_points(values)
+
+    def _reset_points(self) -> None:
+        self._set_points(self._default_points())
+
+    def _axis_changed(self) -> None:
+        low, high = self.axis_min.value(), self.axis_max.value()
+        if high <= low:
+            sender = self.sender()
+            if sender is self.axis_min:
+                high = min(120, low + 10)
+                self.axis_max.blockSignals(True)
+                self.axis_max.setValue(high)
+                self.axis_max.blockSignals(False)
+            else:
+                low = max(0, high - 10)
+                self.axis_min.blockSignals(True)
+                self.axis_min.setValue(low)
+                self.axis_min.blockSignals(False)
+        self.graph.set_axis_range(low, high)
+        settings = application_settings()
+        settings.setValue(f"fans/curve_editor_{self.pwm}/temp_min", low)
+        settings.setValue(f"fans/curve_editor_{self.pwm}/temp_max", high)
+        settings.sync()
+
+    def _refresh_buttons(self) -> None:
+        if hasattr(self, "add_button"):
+            self.add_button.setEnabled(len(self._point_rows) < 8)
+            self.remove_button.setEnabled(len(self._point_rows) > 3)
+
+    def _accept_if_valid(self) -> None:
+        valid, message = validate_fan_curve_points(self._points())
+        if not valid:
+            InfoDialog(
+                "Invalid fan curve",
+                message,
+                icon_name="warning_orange",
+                parent=self,
+                tone="orange",
+            ).open()
+            return
+        self.accept()
+
+    def policy(self) -> dict:
+        common = {
+            "schema": 1,
+            "pwm": self.pwm,
+            "points": [list(point) for point in self._points()],
+            "failsafe_percent": int(self.failsafe.value()),
+            "hysteresis_c": float(self.hysteresis.value()),
+            "deadband_percent": int(self.deadband.value()),
+            "max_down_step_percent": int(self.max_down.value()),
+            "sensor_timeout_seconds": float(self.sensor_timeout.value()),
+        }
+        if self.pwm == 3:
+            common["critical_c"] = float(self.critical.value())
+            return common
+
+        original_critical = self._policy.get("critical_c")
+        critical = dict(original_critical) if isinstance(original_critical, dict) else {}
+        critical.update({
+            "gpu": float(self.critical.value()),
+            "cpu": float(self.critical.value()),
+            "vrm": float(critical.get("vrm", 105.0)),
+            "board": float(critical.get("board", 90.0)),
+        })
+        offsets = self._policy.get("offsets_c")
+        offsets = dict(offsets) if isinstance(offsets, dict) else {}
+        for sensor in ("gpu", "cpu", "vrm", "board"):
+            offsets.setdefault(sensor, 0.0)
+        return {
+            **common,
+            "mode": "curve",
+            "critical_c": critical,
+            "offsets_c": offsets,
+        }
 
 
 class FanModeStack(QStackedWidget):
