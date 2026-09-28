@@ -361,6 +361,7 @@ fi
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-fan-pwm-helper" "$SYSTEM_PRIV_HELPER"
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-backplate-fan-controller" "$SYSTEM_BACKPLATE_FAN_HELPER"
 remove_managed_privileged_file "$APP_DIR/packaging/common/bc250-backplate-fan.service" "$SYSTEM_BACKPLATE_FAN_SERVICE"
+remove_path "/var/lib/bc250-control-center/backplate-fan-policy.json"
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-steamos-game-helper" "$SYSTEM_STEAMOS_GAME_HELPER"
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-cu-helper" "$SYSTEM_CU_HELPER"
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-governor-config-helper" "$SYSTEM_GOVERNOR_CONFIG_HELPER"
