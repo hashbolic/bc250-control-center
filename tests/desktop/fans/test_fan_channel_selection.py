@@ -55,6 +55,7 @@ def test_reference_layout_only_exposes_pwm2_and_pwm3(qtbot):
     controller = _Controller()
     page = FansPage(controller, settings_service=controller)
     qtbot.addWidget(page)
+    page._show_unused_pwm_channels = False
     page.current_state = {
         "driver_control": True,
         "sensores": {"fans": [_fan(1, "CPU Fan"), _fan(2, "Pump Fan"), _fan(3, "System Fan")]},
@@ -78,6 +79,7 @@ def test_unused_pwm_channels_are_not_selectable_or_persisted(qtbot):
     controller = _Controller()
     page = FansPage(controller, settings_service=controller)
     qtbot.addWidget(page)
+    page._show_unused_pwm_channels = False
     page._fan_preset_config = {
         "enabled": True,
         "preset": "balanced",
@@ -101,6 +103,16 @@ def test_unused_pwm_channels_are_not_selectable_or_persisted(qtbot):
     assert page.channel_combo.findData(1) == -1
     assert page.channel_combo.findData(4) == -1
     assert [page.channel_combo.itemData(i) for i in range(page.channel_combo.count())] == [2, 3]
+    assert page.show_unused_pwm_row.isHidden() is False
+    assert controller.saved == []
+
+    page.show_unused_pwm_toggle.setChecked(True)
+    qtbot.wait(10)
+
+    assert [page.channel_combo.itemData(i) for i in range(page.channel_combo.count())] == [2, 1, 3, 4]
+    assert page.channel_combo.findData(1) >= 0
+    assert page.channel_combo.findData(4) >= 0
+    # Visibility is UI state only; showing a channel never writes fan settings.
     assert controller.saved == []
 
 
