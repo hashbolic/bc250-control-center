@@ -141,9 +141,12 @@ def read_backplate_source(
         if math.isfinite(value) and 0.0 < value <= 130.0:
             gpu_vrm = value
 
-    if gddr6_hotspot is None and gpu_vrm is None:
+    # GDDR6 is the safety-critical source for this fan.  GPU VRM is an
+    # additional "max" input, not a substitute: losing the memory sensor must
+    # still drive the controller into its existing safe/failsafe path.
+    if gddr6_hotspot is None:
         return None, None, None
-    if gpu_vrm is not None and (gddr6_hotspot is None or gpu_vrm > gddr6_hotspot):
+    if gpu_vrm is not None and gpu_vrm > gddr6_hotspot:
         return gpu_vrm, "gpu_vrm", None
     return gddr6_hotspot, "gddr6_hotspot", hotspot_chip
 
