@@ -1302,20 +1302,6 @@ class FanCurveScale(QWidget):
         if self.axis_min is not None and self.axis_max is not None:
             return self.axis_min, self.axis_max
         temperatures = [float(temperature) for temperature, _speed in self.points]
-        if self.actual_duty is not None:
-            actual_y = y_for(self.actual_duty)
-            actual = QColor(COLORS["cyan"])
-            painter.setPen(QPen(actual, 1.5, Qt.PenStyle.DashLine))
-            painter.drawLine(QPointF(plot.left(), actual_y), QPointF(plot.right(), actual_y))
-            duty_text = f"{int(round(self.actual_duty))}%"
-            duty_width = metrics.horizontalAdvance(duty_text) + 10
-            painter.setPen(actual)
-            painter.drawText(
-                QRectF(plot.right() - duty_width, actual_y - metrics.height() - 3, duty_width, metrics.height()),
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                duty_text,
-            )
-
         if self.live_temperature is not None:
             temperatures.append(float(self.live_temperature))
         low = min([self.MIN_TEMPERATURE, *(value - 5 for value in temperatures)])
@@ -1610,6 +1596,25 @@ class FanCurveScale(QWidget):
                 str(index + 1),
             )
         painter.setFont(font)
+
+        if self.actual_duty is not None:
+            actual_y = y_for(self.actual_duty)
+            actual = QColor(COLORS["cyan"])
+            painter.setPen(QPen(actual, 1.5, Qt.PenStyle.DashLine))
+            painter.drawLine(QPointF(plot.left(), actual_y), QPointF(plot.right(), actual_y))
+            duty_text = f"{int(round(self.actual_duty))}%"
+            duty_width = metrics.horizontalAdvance(duty_text) + 10
+            painter.setPen(actual)
+            painter.drawText(
+                QRectF(
+                    plot.right() - duty_width,
+                    actual_y - metrics.height() - 3,
+                    duty_width,
+                    metrics.height(),
+                ),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                duty_text,
+            )
 
         if self.live_temperature is not None:
             live_x = x_for(self.live_temperature)
