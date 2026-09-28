@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import QLabel
 
 from frontends.desktop.i18n import current_language, localize_widget_tree, set_language
 from frontends.desktop.pages import fans as fans_module
-from frontends.desktop.pages.fans import FanCurvePlot, FansPage
+from frontends.desktop.pages.fans import FanCurvePlot, FansPage, ReferenceCurveDialog
 from frontends.desktop.theme import COLORS
 
 
@@ -387,6 +387,42 @@ def test_curve_graph_drag_updates_numeric_editor_without_hardware_write(qtbot):
     assert page._curve_points_values() == [(50, 30), (63, 57), (70, 50)]
     assert page._curve_dirty is True
     assert controller.saved == []
+
+
+def test_reference_curve_dialog_exposes_coolercontrol_style_controls(qtbot):
+    policy = {
+        "schema": 1,
+        "pwm": 3,
+        "points": [[0, 25], [50, 35], [60, 60], [75, 100]],
+        "failsafe_percent": 100,
+        "hysteresis_c": 1.5,
+        "deadband_percent": 2,
+        "max_down_step_percent": 10,
+        "sensor_timeout_seconds": 15.0,
+        "critical_c": 95.0,
+    }
+    dialog = ReferenceCurveDialog(
+        pwm=3,
+        title="Backplate fan curve",
+        source="max(GDDR6 hotspot, GPU VRM)",
+        policy=policy,
+        live_temperature=58.0,
+        actual_duty=45.0,
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog._points() == [(0, 25), (50, 35), (60, 60), (75, 100)]
+    assert dialog.graph.scale.actual_duty == 45.0
+    assert dialog.graph.scale.live_temperature == 58.0
+    assert dialog.add_button.isEnabled() is True
+    assert dialog.remove_button.isEnabled() is True
+
+    dialog._graph_point_added(65, 70)
+    assert (65, 70) in dialog._points()
+    saved = dialog.policy()
+    assert saved["pwm"] == 3
+    assert saved["points"] == [list(point) for point in dialog._points()]
+    assert saved["critical_c"] == 95.0
 
 
 def test_curve_response_map_matches_the_controller_step_ranges(qtbot):
