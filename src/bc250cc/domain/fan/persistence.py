@@ -32,6 +32,10 @@ DEFAULT_CRITICAL_TEMPERATURES_C = {
     "vrm": 105.0,
     "board": 90.0,
 }
+# Hashbolic reference enclosure: PWM2 is the main APU fan. Its normal curve
+# follows only CPU/GPU; VRM/board remain safety sensors and can still force
+# the configured critical/failsafe duty.
+FAN_CURVE_CONTROL_SENSORS = frozenset({"gpu", "cpu"})
 
 
 @dataclass(frozen=True)
@@ -277,7 +281,10 @@ def select_fan_control_temperature(
     metric: object, config: object = None, *, now: float | None = None,
 ) -> tuple[float | None, str | None]:
     """Select the hottest fresh APU, VRM or board reading for the fan curve."""
-    readings = _temperature_readings(metric, config, now=now)
+    readings = [
+        item for item in _temperature_readings(metric, config, now=now)
+        if item[2] in FAN_CURVE_CONTROL_SENSORS
+    ]
     if not readings:
         return None, None
     effective, _raw, sensor = max(readings, key=lambda item: item[0])
