@@ -46,6 +46,7 @@ STATE_FILE = STATE_DIR / 'fan-last-applied.json'
 # nothing at login has to ask for a password. The status and override files
 # live on /run: they describe this boot only.
 POLICY_FILE = STATE_DIR / 'fan-policy.json'
+BACKPLATE_POLICY_FILE = STATE_DIR / 'backplate-fan-policy.json'
 RUNTIME_DIR = Path('/run/bc250-control-center')
 STATUS_FILE = RUNTIME_DIR / 'fan-control.json'
 OVERRIDE_FILE = RUNTIME_DIR / 'fan-override.json'
@@ -438,6 +439,56 @@ def validate_policy(data: object) -> dict:
     return policy
 
 
+_BACKPLATE_KEYS = frozenset({
+    'schema', 'pwm', 'points', 'failsafe_percent', 'hysteresis_c',
+    'deadband_percent', 'max_down_step_percent', 'sensor_timeout_seconds',
+    'critical_c',
+})
+
+
+def validate_backplate_policy(data: object) -> dict:
+    """Validate the fixed PWM3 max(GDDR6 hotspot, GPU VRM) curve policy."""
+    if not isinstance(data, dict):
+        raise ValueError('The backplate fan policy must be a JSON object.')
+    unknown = set(data) - _BACKPLATE_KEYS
+    if unknown:
+        raise ValueError(
+            f'Unknown backplate fan policy keys: {", ".join(sorted(unknown))}.'
+        )
+    if data.get('schema') != POLICY_SCHEMA:
+        raise ValueError('Unsupported backplate fan policy schema.')
+    pwm = _policy_int(data, 'pwm', None, PWM_MIN, PWM_MAX)
+    if pwm != 3:
+        raise ValueError('The backplate fan policy must target PWM3.')
+    points = data.get('points')
+    if not isinstance(points, list) or not 3 <= len(points) <= 8:
+        raise ValueError('The backplate fan curve needs between 3 and 8 points.')
+    normalized = []
+    for point in points:
+        if not isinstance(point, list) or len(point) != 2:
+            raise ValueError('Each backplate curve point is [temperature, speed].')
+        temperature = _policy_int({'t': point[0]}, 't', None, 0, 120)
+        speed = _policy_int({'s': point[1]}, 's', None, 0, 100)
+        if normalized and temperature <= normalized[-1][0]:
+            raise ValueError('Backplate curve temperatures must be strictly increasing.')
+        normalized.append([temperature, speed])
+    return {
+        'schema': POLICY_SCHEMA,
+        'pwm': 3,
+        'points': normalized,
+        'failsafe_percent': _policy_int(data, 'failsafe_percent', 100, 40, 100),
+        'hysteresis_c': _policy_float(data, 'hysteresis_c', 1.5, 0.0, 10.0),
+        'deadband_percent': _policy_int(data, 'deadband_percent', 2, 0, 20),
+        'max_down_step_percent': _policy_int(
+            data, 'max_down_step_percent', 10, 1, 100
+        ),
+        'sensor_timeout_seconds': _policy_float(
+            data, 'sensor_timeout_seconds', 15.0, 3.0, 300.0
+        ),
+        'critical_c': _policy_float(data, 'critical_c', 95.0, 50.0, 125.0),
+    }
+
+
 def policy_digest(policy: dict) -> str:
     encoded = json.dumps(policy, sort_keys=True, separators=(',', ':')).encode('utf-8')
     return hashlib.sha256(encoded).hexdigest()[:16]
@@ -464,6 +515,11 @@ def save_policy(policy: dict) -> str:
     _write_json_atomic(POLICY_FILE, policy)
     with suppress(FileNotFoundError):
         OVERRIDE_FILE.unlink()
+    return policy_digest(policy)
+
+
+def save_backplate_policy(policy: dict) -> str:
+    _write_json_atomic(BACKPLATE_POLICY_FILE, policy)
     return policy_digest(policy)
 
 
@@ -1004,6 +1060,15 @@ def session() -> int:
         try:
             if line == 'POLICY-CLEAR' or line.startswith('POLICY '):
                 print(session_policy_command(line), flush=True)
+                continue
+            if line.startswith('BACKPLATE-POLICY '):
+                payload = line[len('BACKPLATE-POLICY '):]
+                if len(payload.encode('utf-8')) > POLICY_MAX_BYTES:
+                    print('ERR The backplate fan policy is too large.', flush=True)
+                    continue
+                policy = validate_backplate_policy(json.loads(payload))
+                digest = save_backplate_policy(policy)
+                print(f'OK BACKPLATE POLICY {digest}', flush=True)
                 continue
             if line == 'CONTROL ENABLE':
                 print(enable_control_service(), flush=True)
