@@ -51,7 +51,7 @@ class _ImmediateFanTask(QObject):
             self.finished.emit()
 
 
-def test_all_detected_pwm_channels_are_selectable_without_hardware_write(qtbot):
+def test_reference_layout_only_exposes_pwm2_and_pwm3(qtbot):
     controller = _Controller()
     page = FansPage(controller, settings_service=controller)
     qtbot.addWidget(page)
@@ -64,7 +64,9 @@ def test_all_detected_pwm_channels_are_selectable_without_hardware_write(qtbot):
     page._apply_state()
 
     assert page.channel_combo.isHidden() is False
-    assert [page.channel_combo.itemData(i) for i in range(page.channel_combo.count())] == [2, 1, 3]
+    assert [page.channel_combo.itemData(i) for i in range(page.channel_combo.count())] == [2, 3]
+    assert "CPU/GPU main fan" in page.channel_combo.itemText(page.channel_combo.findData(2))
+    assert "Backplate / GDDR6" in page.channel_combo.itemText(page.channel_combo.findData(3))
     page.channel_combo.setCurrentIndex(page.channel_combo.findData(3))
     qtbot.waitUntil(lambda: bool(controller.saved), timeout=2000)
     assert controller.saved[-1]["fan_curve"]["pwm"] == 3
@@ -72,7 +74,7 @@ def test_all_detected_pwm_channels_are_selectable_without_hardware_write(qtbot):
     assert not hasattr(page, "selected_channel_title")
 
 
-def test_channel_change_updates_enabled_static_preset_target(qtbot):
+def test_unused_pwm_channels_are_not_selectable_or_persisted(qtbot):
     controller = _Controller()
     page = FansPage(controller, settings_service=controller)
     qtbot.addWidget(page)
@@ -84,16 +86,22 @@ def test_channel_change_updates_enabled_static_preset_target(qtbot):
     }
     page.current_state = {
         "driver_control": True,
-        "sensores": {"fans": [_fan(2, "Pump Fan"), _fan(4, "System Fan #2")]},
+        "sensores": {
+            "fans": [
+                _fan(1, "Unused #1"),
+                _fan(2, "Main"),
+                _fan(3, "Backplate"),
+                _fan(4, "Unused #4"),
+            ]
+        },
         "modulos": {"nct6687": True},
     }
     page._apply_state()
 
-    page.channel_combo.setCurrentIndex(page.channel_combo.findData(4))
-    qtbot.waitUntil(lambda: bool(controller.saved), timeout=2000)
-
-    assert controller.saved[-1]["fan_preset"]["pwm"] == 4
-    assert controller.saved[-1]["fan_preset"]["enabled"] is True
+    assert page.channel_combo.findData(1) == -1
+    assert page.channel_combo.findData(4) == -1
+    assert [page.channel_combo.itemData(i) for i in range(page.channel_combo.count())] == [2, 3]
+    assert controller.saved == []
 
 
 def test_single_detected_channel_uses_clean_readout_without_empty_selector(qtbot):
@@ -343,6 +351,29 @@ def test_disabled_curve_rejects_programmatic_preset_without_mutating_or_persisti
     qtbot.wait(20)
 
     assert page._curve_points_values() == before
+    assert controller.saved == []
+
+
+def test_curve_graph_drag_updates_numeric_editor_without_hardware_write(qtbot):
+    controller = _Controller()
+    page = FansPage(controller, settings_service=controller)
+    qtbot.addWidget(page)
+    page.current_state = {
+        "driver_control": True,
+        "sensores": {"fans": [_fan(2, "Main"), _fan(3, "Backplate")]},
+        "modulos": {"nct6687": True},
+    }
+    page._apply_state()
+    page.curve_enabled.blockSignals(True)
+    page.curve_enabled.setChecked(True)
+    page.curve_enabled.blockSignals(False)
+    page._replace_curve_points([(50, 30), (60, 40), (70, 50)])
+
+    page._curve_plot_point_moved(1, 63, 57)
+
+    assert page.curve_points[1].values() == (63, 57)
+    assert page._curve_points_values() == [(50, 30), (63, 57), (70, 50)]
+    assert page._curve_dirty is True
     assert controller.saved == []
 
 
