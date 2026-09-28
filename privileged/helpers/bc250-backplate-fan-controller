@@ -1,0 +1,332 @@
+#!/usr/bin/python3 -I
+"""BC250 reference backplate fan controller.
+
+Hashbolic BC250 reference hardware mapping:
+  PWM2 -> main CPU/GPU fan (owned by the standard Control Center fan policy)
+  PWM3 -> backplate/GDDR6 fan (owned by this service)
+
+The backplate fan follows the hottest of the eight GDDR6 chips published by
+BC250-Telemetry in /run/apu_telemetry.json.  The service never touches the SMU
+mailbox itself: if telemetry is unavailable or stale it fails safe instead of
+starting a second memory-temperature sampler.
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import runpy
+import signal
+import stat
+import sys
+import tempfile
+import time
+from contextlib import suppress
+from pathlib import Path
+
+PWM_CHANNEL = 3
+PWM_HELPER = Path("/usr/libexec/bc250-control-center/bc250-fan-pwm-helper")
+TELEMETRY_PATH = Path("/run/apu_telemetry.json")
+STATUS_PATH = Path("/run/bc250-control-center/backplate-fan.json")
+
+TELEMETRY_MAX_AGE_SECONDS = 5.0
+SENSOR_TIMEOUT_SECONDS = 15.0
+VERIFY_SECONDS = 30.0
+MIN_REWRITE_SECONDS = 5.0
+HYSTERESIS_C = 1.5
+DEADBAND_PERCENT = 2
+MAX_DOWN_STEP_PERCENT = 10
+STARTUP_SAFE_PERCENT = 70
+FAILSAFE_PERCENT = 100
+CRITICAL_C = 95.0
+
+# Step curve requested for the reference BC250 enclosure.
+# Below 55 C the first point stays active.
+CURVE = (
+    (0.0, 25),
+    (55.0, 35),
+    (65.0, 50),
+    (75.0, 70),
+    (85.0, 90),
+    (90.0, 100),
+)
+
+MEMORY_CHIP_COUNT = 8
+MEMORY_CODE_MAX = 80
+
+
+def _trusted_root_file(path: Path) -> bool:
+    try:
+        info = path.stat()
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == 0
+        and not info.st_mode & 0o022
+    )
+
+
+def _load_pwm_backend() -> dict:
+    if not _trusted_root_file(PWM_HELPER):
+        raise RuntimeError(
+            f"Trusted PWM helper is missing or writable: {PWM_HELPER}"
+        )
+    module = runpy.run_path(str(PWM_HELPER))
+    required = ("apply_pwm", "restore_automatic", "find_sensor",
+                "fan_operation_lock", "bc250_identity_present")
+    if any(name not in module for name in required):
+        raise RuntimeError("Installed PWM helper does not expose the expected API.")
+    return module
+
+
+def _fresh_payload(
+    path: Path = TELEMETRY_PATH,
+    *,
+    now: float | None = None,
+    max_age: float = TELEMETRY_MAX_AGE_SECONDS,
+) -> dict:
+    current = time.time() if now is None else float(now)
+    try:
+        age = current - path.stat().st_mtime
+        if age < 0 or age > max_age:
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def read_gddr6_hotspot(
+    path: Path = TELEMETRY_PATH,
+    *,
+    now: float | None = None,
+) -> tuple[float | None, int | None]:
+    """Return (hotspot_c, chip_index) from BC250-Telemetry, or (None, None)."""
+    payload = _fresh_payload(path, now=now)
+    memory = payload.get("memory") if isinstance(payload, dict) else None
+    if not isinstance(memory, dict):
+        return None, None
+    if memory.get("status") != "ok" or memory.get("valid") is not True:
+        return None, None
+    raw = memory.get("raw")
+    if not isinstance(raw, list) or len(raw) != MEMORY_CHIP_COUNT:
+        return None, None
+
+    temperatures: list[float] = []
+    for word in raw:
+        if type(word) is not int or not 0 <= word <= 0xFFFFFFFF:
+            return None, None
+        code = word & 0xFF
+        if code > MEMORY_CODE_MAX:
+            return None, None
+        temperatures.append(float(code * 2 - 40))
+
+    hotspot = max(temperatures)
+    return hotspot, temperatures.index(hotspot)
+
+
+def curve_percent(temperature: float) -> int:
+    target = int(CURVE[0][1])
+    for threshold, percent in CURVE:
+        if temperature >= threshold:
+            target = int(percent)
+    return max(0, min(100, target))
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o644)
+        os.replace(temporary, path)
+    finally:
+        with suppress(FileNotFoundError):
+            temporary.unlink()
+
+
+class BackplateController:
+    def __init__(self, backend: dict, *, clock=time.monotonic, wall=time.time):
+        self.backend = backend
+        self.clock = clock
+        self.wall = wall
+        self.last_percent: int | None = None
+        self.last_temperature: float | None = None
+        self.last_raw: int | None = None
+        self.last_write: float | None = None
+        self.last_verify = 0.0
+        self.missing_since: float | None = None
+        self.state = "starting"
+        self.error = ""
+        self.hotspot_chip: int | None = None
+
+    def _target(self, now: float) -> tuple[int, str, float | None, int | None]:
+        hotspot, chip = read_gddr6_hotspot(now=self.wall())
+        if hotspot is None:
+            if self.missing_since is None:
+                self.missing_since = now
+            if self.last_percent is None:
+                return STARTUP_SAFE_PERCENT, "startup-safe", None, None
+            if now - self.missing_since >= SENSOR_TIMEOUT_SECONDS:
+                return FAILSAFE_PERCENT, "failsafe", None, None
+            return self.last_percent, "sensor-wait", None, None
+
+        self.missing_since = None
+        if hotspot >= CRITICAL_C:
+            return FAILSAFE_PERCENT, "critical", hotspot, chip
+
+        percent = curve_percent(hotspot)
+        if self.last_percent is not None and self.last_temperature is not None:
+            if abs(hotspot - self.last_temperature) < HYSTERESIS_C:
+                percent = self.last_percent
+            if abs(percent - self.last_percent) <= DEADBAND_PERCENT:
+                percent = self.last_percent
+            if percent < self.last_percent - MAX_DOWN_STEP_PERCENT:
+                percent = self.last_percent - MAX_DOWN_STEP_PERCENT
+        return percent, "gddr6", hotspot, chip
+
+    def _read_back(self) -> tuple[int | None, int | None]:
+        sensor = self.backend["find_sensor"]()
+        if sensor is None:
+            return None, None
+        result = []
+        for path in (
+            sensor / f"pwm{PWM_CHANNEL}",
+            sensor / f"pwm{PWM_CHANNEL}_enable",
+        ):
+            try:
+                result.append(int(path.read_text(encoding="ascii").strip()))
+            except (OSError, ValueError):
+                result.append(None)
+        return result[0], result[1]
+
+    def _apply(
+        self,
+        raw: int,
+        percent: int,
+        source: str,
+        temperature: float | None,
+        chip: int | None,
+        now: float,
+    ) -> None:
+        with self.backend["fan_operation_lock"]():
+            reply = self.backend["apply_pwm"](PWM_CHANNEL, raw)
+        self.last_write = now
+        self.last_verify = now
+        if not str(reply).startswith("OK"):
+            self.state = "error"
+            self.error = str(reply)
+            return
+        self.last_raw = raw
+        self.last_percent = percent
+        self.last_temperature = temperature
+        self.hotspot_chip = chip
+        self.state = "active"
+        self.error = ""
+
+    def step(self) -> None:
+        now = self.clock()
+        if self.backend["find_sensor"]() is None:
+            self.state = "waiting-driver"
+            return
+
+        percent, source, temperature, chip = self._target(now)
+        raw = round(percent * 255 / 100)
+        emergency = source in {"critical", "failsafe"}
+
+        if raw != self.last_raw:
+            recent = self.last_write is not None and now - self.last_write < MIN_REWRITE_SECONDS
+            if recent and not emergency:
+                return
+            self._apply(raw, percent, source, temperature, chip, now)
+            return
+
+        if now - self.last_verify >= VERIFY_SECONDS:
+            self.last_verify = now
+            value, enabled = self._read_back()
+            if value != raw or (enabled is not None and enabled != 1):
+                self._apply(raw, percent, source, temperature, chip, now)
+
+        if self.state != "error":
+            self.state = "active"
+            self.hotspot_chip = chip
+            if temperature is not None:
+                self.last_temperature = temperature
+
+    def status(self) -> dict:
+        return {
+            "schema": 1,
+            "pid": os.getpid(),
+            "heartbeat": round(self.wall(), 1),
+            "state": self.state,
+            "error": self.error,
+            "pwm": PWM_CHANNEL,
+            "percent": self.last_percent,
+            "raw": self.last_raw,
+            "temperature": (
+                None if self.last_temperature is None
+                else round(self.last_temperature, 1)
+            ),
+            "sensor": "gddr6_hotspot",
+            "hotspot_chip": self.hotspot_chip,
+            "curve": [[temperature, percent] for temperature, percent in CURVE],
+            "critical_c": CRITICAL_C,
+            "failsafe_percent": FAILSAFE_PERCENT,
+        }
+
+    def publish(self) -> None:
+        with suppress(OSError):
+            _write_json_atomic(STATUS_PATH, self.status())
+
+    def release(self) -> None:
+        with suppress(Exception):
+            with self.backend["fan_operation_lock"]():
+                self.backend["restore_automatic"](PWM_CHANNEL)
+
+
+def run() -> int:
+    if os.geteuid() != 0:
+        print("ERR backplate fan controller must run as root.", flush=True)
+        return 77
+
+    backend = _load_pwm_backend()
+    if not backend["bc250_identity_present"]():
+        print("ERR AMD BC-250 hardware identity was not detected.", flush=True)
+        return 19
+
+    stop = {"requested": False}
+
+    def request_stop(_signal, _frame) -> None:
+        stop["requested"] = True
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    controller = BackplateController(backend)
+    print("READY BC250 reference backplate fan control (PWM3 / GDDR6)", flush=True)
+    try:
+        while not stop["requested"]:
+            try:
+                controller.step()
+            except Exception as exc:
+                controller.state = "error"
+                controller.error = str(exc)
+            controller.publish()
+            deadline = time.monotonic() + 2.0
+            while not stop["requested"] and time.monotonic() < deadline:
+                time.sleep(0.2)
+    finally:
+        controller.release()
+        with suppress(OSError):
+            STATUS_PATH.unlink()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())
