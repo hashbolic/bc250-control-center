@@ -50,6 +50,8 @@ METAINFO_DIR="$PREFIX/share/metainfo"
 SYSTEMD_USER_DIR="$PREFIX/lib/systemd/user"
 DOC_DIR="$PREFIX/share/doc/bc250-control-center"
 SYSTEM_PRIV_HELPER="/usr/libexec/bc250-control-center/bc250-fan-pwm-helper"
+SYSTEM_BACKPLATE_FAN_HELPER="/usr/libexec/bc250-control-center/bc250-backplate-fan-controller"
+SYSTEM_BACKPLATE_FAN_SERVICE="/etc/systemd/system/bc250-backplate-fan.service"
 SYSTEM_STEAMOS_GAME_HELPER="/usr/libexec/bc250-control-center/bc250-steamos-game-helper"
 SYSTEM_GOVERNOR_CONFIG_HELPER="/usr/libexec/bc250-control-center/bc250-governor-config-helper"
 SYSTEM_CORE_UNLOCK_HELPER="/usr/libexec/bc250-control-center/bc250-core-unlock-helper"
@@ -334,6 +336,8 @@ install -Dm644 "$ROOT_DIR/LICENSE" "$DOC_DIR/LICENSE"
 install -Dm644 "$ROOT_DIR/docs/THIRD_PARTY_NOTICES.md" "$DOC_DIR/THIRD_PARTY_NOTICES.md"
 install_privileged_pwm_components() {
   local helper_source="$ROOT_DIR/privileged/helpers/bc250-fan-pwm-helper"
+  local backplate_fan_helper_source="$ROOT_DIR/privileged/helpers/bc250-backplate-fan-controller"
+  local backplate_fan_service_source="$ROOT_DIR/packaging/common/bc250-backplate-fan.service"
   local system_setup_helper_source="$ROOT_DIR/privileged/helpers/bc250-system-setup-helper"
   local steamos_helper_source="$ROOT_DIR/privileged/helpers/bc250-steamos-game-helper"
   local governor_helper_source="$ROOT_DIR/privileged/helpers/bc250-governor-config-helper"
@@ -396,6 +400,8 @@ install_privileged_pwm_components() {
     "/usr/libexec/bc250-control-center/lib/bc250_contract.py"
     "$cu_helper_target"
     "$SYSTEM_PRIV_HELPER"
+    "$SYSTEM_BACKPLATE_FAN_HELPER"
+    "$SYSTEM_BACKPLATE_FAN_SERVICE"
     "$SYSTEM_STEAMOS_GAME_HELPER"
     "$SYSTEM_QUICK_ACCESS_HELPER"
     "$SYSTEM_GOVERNOR_CONFIG_HELPER"
@@ -448,6 +454,8 @@ install_privileged_pwm_components() {
       "${elevate[@]}" install -Dm644 "$ROOT_DIR/privileged/lib/$setup_module" "/usr/libexec/bc250-control-center/lib/$setup_module"
     done
     "${elevate[@]}" install -Dm755 "$helper_source" "$SYSTEM_PRIV_HELPER"
+    "${elevate[@]}" install -Dm755 "$backplate_fan_helper_source" "$SYSTEM_BACKPLATE_FAN_HELPER"
+    "${elevate[@]}" install -Dm644 "$backplate_fan_service_source" "$SYSTEM_BACKPLATE_FAN_SERVICE"
     "${elevate[@]}" install -Dm755 "$cu_helper_source" "$cu_helper_target"
     "${elevate[@]}" install -Dm755 "$steamos_helper_source" "$SYSTEM_STEAMOS_GAME_HELPER"
     "${elevate[@]}" install -Dm755 "$quick_access_helper_source" "$SYSTEM_QUICK_ACCESS_HELPER"
@@ -487,6 +495,7 @@ install_privileged_pwm_components() {
       "$system_setup_helper_source:/usr/libexec/bc250-control-center/bc250-system-setup-helper" \
       "$cu_helper_source:$cu_helper_target" \
       "$helper_source:$SYSTEM_PRIV_HELPER" \
+      "$backplate_fan_helper_source:$SYSTEM_BACKPLATE_FAN_HELPER" \
       "$steamos_helper_source:$SYSTEM_STEAMOS_GAME_HELPER" \
       "$governor_helper_source:$SYSTEM_GOVERNOR_CONFIG_HELPER" \
       "$core_unlock_helper_source:$SYSTEM_CORE_UNLOCK_HELPER" \
@@ -511,6 +520,18 @@ install_privileged_pwm_components() {
         exit 1
       fi
     done
+    if ! cmp -s "$backplate_fan_service_source" "$SYSTEM_BACKPLATE_FAN_SERVICE"; then
+      echo "ERROR: installed backplate fan service does not match this build: $SYSTEM_BACKPLATE_FAN_SERVICE" >&2
+      exit 1
+    fi
+    backplate_service_metadata="$("${elevate[@]}" stat -c '%u:%a' "$SYSTEM_BACKPLATE_FAN_SERVICE")"
+    if [[ "$backplate_service_metadata" != "0:644" ]]; then
+      echo "ERROR: backplate fan service must be root-owned mode 0644: $SYSTEM_BACKPLATE_FAN_SERVICE" >&2
+      exit 1
+    fi
+    if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+      "${elevate[@]}" systemctl daemon-reload
+    fi
     for implementation_pair in \
       "$governor_toml_source:$SYSTEM_GOVERNOR_TOML_IMPLEMENTATION" \
       "$cpu_smu_vendor_source:$SYSTEM_CPU_SMU_VENDOR"; do
