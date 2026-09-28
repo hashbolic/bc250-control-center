@@ -576,6 +576,15 @@ class FanRepository:
         resultado['servicio'] = self._comando_fan_helper('CONTROL ENABLE', timeout=150)
         return resultado
 
+    def sincronizar_control_fan_backplate(self, politica):
+        """Persist the validated PWM3 curve followed by the root backplate service."""
+        self._requerir_helper_control_sistema()
+        if not isinstance(politica, dict):
+            raise RuntimeError('Backplate fan policy must be an object.')
+        payload = json.dumps(politica, sort_keys=True, separators=(',', ':'))
+        salida = self._comando_fan_helper(f'BACKPLATE-POLICY {payload}')
+        return {'salida': salida, 'digest': salida.rsplit(' ', 1)[-1]}
+
     def desactivar_control_fan_sistema(self):
         self._requerir_helper_control_sistema()
         return {'servicio': self._comando_fan_helper('CONTROL DISABLE', timeout=150)}
