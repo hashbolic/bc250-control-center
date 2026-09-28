@@ -1,0 +1,24 @@
+[Unit]
+Description=BC250 reference backplate/GDDR6 fan control
+Documentation=https://github.com/hashbolic/bc250-control-center
+After=local-fs.target systemd-udev-settle.service
+Wants=nct6687-load.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/bc250-control-center/bc250-backplate-fan-controller
+Restart=always
+RestartSec=3
+RestartPreventExitStatus=19 77
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
