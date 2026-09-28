@@ -18,6 +18,7 @@ def module(tmp_path, monkeypatch):
     g = data["read_backplate_source"].__globals__
     monkeypatch.setitem(g, "TELEMETRY_PATH", tmp_path / "apu_telemetry.json")
     monkeypatch.setitem(g, "STATUS_PATH", tmp_path / "backplate-fan.json")
+    monkeypatch.setitem(g, "POLICY_PATH", tmp_path / "backplate-fan-policy.json")
     return data, g
 
 
@@ -84,6 +85,38 @@ def test_missing_gddr6_does_not_fall_back_to_gpu_vrm(module):
     os.utime(path, None)
 
     assert data["read_backplate_source"](path) == (None, None, None)
+
+
+def test_reloadable_backplate_policy_changes_curve_without_restart(module):
+    data, g = module
+    policy_path = g["POLICY_PATH"]
+    policy_path.write_text(json.dumps({
+        "schema": 1,
+        "pwm": 3,
+        "points": [[0, 20], [50, 40], [60, 80], [75, 100]],
+        "failsafe_percent": 100,
+        "hysteresis_c": 1.5,
+        "deadband_percent": 2,
+        "max_down_step_percent": 10,
+        "sensor_timeout_seconds": 15.0,
+        "critical_c": 95.0,
+    }), encoding="utf-8")
+
+    policy = data["load_policy"](policy_path)
+
+    assert policy["points"] == [[0, 20], [50, 40], [60, 80], [75, 100]]
+    assert data["curve_percent"](60.0, policy["points"]) == 80
+
+
+def test_backplate_policy_refuses_wrong_channel(module):
+    data, _g = module
+
+    with pytest.raises(ValueError, match="PWM3"):
+        data["validate_policy"]({
+            "schema": 1,
+            "pwm": 2,
+            "points": [[0, 20], [50, 40], [75, 100]],
+        })
 
 
 def test_missing_telemetry_goes_startup_safe_then_failsafe(module):
