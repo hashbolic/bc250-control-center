@@ -109,7 +109,8 @@ from ..core.state import state_cache_for
 from ..i18n import localize_widget_tree, tr, tr_format
 from ..theme import COLORS, application_stylesheet, scale_stylesheet
 
-VISIBLE_PWM_ORDER = (2, 3)
+ALL_PWM_ORDER = (2, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)
+REFERENCE_PWM_ORDER = (2, 3)
 #: Below this duty a manual speed asks before it is written: the board can
 #: overheat under load. Anything above is applied on the click.
 LOW_DUTY_CONFIRM_PERCENT = 30
@@ -2155,6 +2156,14 @@ class FansPage(QWidget):
         self._refresh_error = ""
         self._preferred_pwm = 2
         self._curve_target_pwm = 2
+        try:
+            self._show_unused_pwm_channels = bool(
+                application_settings().value(
+                    "fans/show_unused_pwm_channels", False, type=bool
+                )
+            )
+        except Exception:
+            self._show_unused_pwm_channels = False
         self._staged_pwm_percent = 70
         self._control_mode = "manual"
         self._curve_editor_open = False
@@ -2372,6 +2381,15 @@ class FansPage(QWidget):
         # The channel row hides itself when the board reports one channel;
         # the next row then carries the first hairline.
         box.addWidget(self.channel_selector_host)
+        self.show_unused_pwm_row = FieldRow("Show unused PWM channels")
+        self.show_unused_pwm_toggle = ToggleSwitch()
+        self.show_unused_pwm_toggle.setAccessibleName(tr("Show unused PWM channels"))
+        self.show_unused_pwm_toggle.blockSignals(True)
+        self.show_unused_pwm_toggle.setChecked(self._show_unused_pwm_channels)
+        self.show_unused_pwm_toggle.blockSignals(False)
+        self.show_unused_pwm_toggle.toggled.connect(self._show_unused_pwm_changed)
+        self.show_unused_pwm_row.add(self.show_unused_pwm_toggle)
+        box.addWidget(self.show_unused_pwm_row)
         # Readings, not inline labels, so their numbers and units line up
         # with every other row. The labels they mirror stay as data seams.
         self.speed_reading = Reading("Speed")
@@ -4035,8 +4053,23 @@ class FansPage(QWidget):
             )
         )
 
+    def _visible_pwm_order(self) -> tuple[int, ...]:
+        return ALL_PWM_ORDER if self._show_unused_pwm_channels else REFERENCE_PWM_ORDER
+
+    def _show_unused_pwm_changed(self, enabled: bool) -> None:
+        self._show_unused_pwm_channels = bool(enabled)
+        try:
+            settings = application_settings()
+            settings.setValue("fans/show_unused_pwm_channels", self._show_unused_pwm_channels)
+            settings.sync()
+        except Exception:
+            pass
+        # This is a presentation preference only. Rebuild the selector from
+        # the already-read hwmon state; no hardware write is issued.
+        self._apply_state()
+
     def _visible_fans(self) -> list[dict]:
-        return list(visible_fans(self.current_state, visible_order=VISIBLE_PWM_ORDER))
+        return list(visible_fans(self.current_state, visible_order=self._visible_pwm_order()))
 
     def _main_fan(self) -> dict:
         fans = self._visible_fans()
@@ -4589,7 +4622,7 @@ class FansPage(QWidget):
             self.current_state,
             self.performance_state,
             self.gpu_state,
-            visible_order=VISIBLE_PWM_ORDER,
+            visible_order=self._visible_pwm_order(),
             selected_index=selected_before,
             preferred_index=self._preferred_pwm,
         )
@@ -4635,6 +4668,15 @@ class FansPage(QWidget):
         # selected channel name visible and reveal this compact selector only
         # when the hardware actually exposes a choice.
         self.channel_selector_host.setVisible(self.channel_combo.count() > 1)
+
+        raw_sensors = self.current_state.get("sensores")
+        raw_fans = raw_sensors.get("fans") if isinstance(raw_sensors, dict) else []
+        detected_indexes = {
+            _integer(item.get("index"), -1)
+            for item in raw_fans if isinstance(item, dict) and item.get("pwm_path")
+        }
+        has_unused = bool(detected_indexes - set(REFERENCE_PWM_ORDER))
+        self.show_unused_pwm_row.setVisible(has_unused)
 
         for row, channel in zip(self.channel_rows, fans + [None] * (len(self.channel_rows) - len(fans))):
             row.set_channel(channel)
@@ -4966,7 +5008,7 @@ class FansPage(QWidget):
             self.current_state,
             self.performance_state,
             self.gpu_state,
-            visible_order=VISIBLE_PWM_ORDER,
+            visible_order=self._visible_pwm_order(),
             selected_index=self.channel_combo.currentData(),
             preferred_index=self._preferred_pwm,
         ).gpu_temperature
@@ -4976,7 +5018,7 @@ class FansPage(QWidget):
             self.current_state,
             self.performance_state,
             self.gpu_state,
-            visible_order=VISIBLE_PWM_ORDER,
+            visible_order=self._visible_pwm_order(),
             selected_index=self.channel_combo.currentData(),
             preferred_index=self._preferred_pwm,
         ).cpu_temperature
