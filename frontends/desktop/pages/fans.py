@@ -1751,6 +1751,8 @@ class ReferenceCurveDialog(QDialog):
         self._policy = dict(policy or {})
         self._selected_point: int | None = None
         self._loading = False
+        self._live_temperature = live_temperature
+        self._actual_duty = actual_duty
         self._point_rows: list[CurvePoint] = []
         self.setWindowTitle(tr(title))
         self.setMinimumSize(860, 650)
@@ -1980,6 +1982,18 @@ class ReferenceCurveDialog(QDialog):
         self.failsafe.setValue(_integer(self._policy.get("failsafe_percent"), 100))
         self._refresh_buttons()
 
+    @staticmethod
+    def _target_for_temperature(
+        points: list[tuple[int, int]], temperature: float | None
+    ) -> int | None:
+        if temperature is None or not points:
+            return None
+        target = int(points[0][1])
+        for threshold, duty in points:
+            if float(temperature) >= float(threshold):
+                target = int(duty)
+        return max(0, min(100, target))
+
     def _set_points(self, values: list[tuple[int, int]], *, selected: int | None = None) -> None:
         values = self._repair_points(values)
         if len(values) < 3:
@@ -2001,6 +2015,12 @@ class ReferenceCurveDialog(QDialog):
             if selected is not None and values else None
         )
         self.graph.set_curve(values)
+        self.graph.set_live(
+            self._live_temperature,
+            self._target_for_temperature(values, self._live_temperature),
+            self.source,
+        )
+        self.graph.set_actual_duty(self._actual_duty)
         self.graph.scale.selected = self._selected_point
         self.graph.scale.update()
         self._refresh_buttons()
