@@ -84,6 +84,7 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setitem(g, "STATE_DIR", state)
     monkeypatch.setitem(g, "STATE_FILE", state / "fan-last-applied.json")
     monkeypatch.setitem(g, "POLICY_FILE", state / "fan-policy.json")
+    monkeypatch.setitem(g, "BACKPLATE_POLICY_FILE", state / "backplate-fan-policy.json")
     monkeypatch.setitem(g, "STATUS_FILE", run / "fan-control.json")
     monkeypatch.setitem(g, "OVERRIDE_FILE", run / "fan-override.json")
     monkeypatch.setattr(g["time"], "sleep", lambda _seconds: None)
@@ -144,6 +145,30 @@ def test_the_root_helper_refuses_rather_than_repairs(board, mutation, message):
     mutation(policy)
     with pytest.raises(ValueError, match=message):
         module["validate_policy"](policy)
+
+
+def test_backplate_policy_validation_and_persistence(board):
+    module, g, _nct, _k10 = board
+    policy = {
+        "schema": 1,
+        "pwm": 3,
+        "points": [[0, 25], [50, 35], [60, 60], [75, 100]],
+        "failsafe_percent": 100,
+        "hysteresis_c": 1.5,
+        "deadband_percent": 2,
+        "max_down_step_percent": 10,
+        "sensor_timeout_seconds": 15.0,
+        "critical_c": 95.0,
+    }
+
+    validated = module["validate_backplate_policy"](policy)
+    digest = module["save_backplate_policy"](validated)
+
+    assert digest == module["policy_digest"](validated)
+    assert json.loads(g["BACKPLATE_POLICY_FILE"].read_text()) == validated
+    bad = dict(policy, pwm=2)
+    with pytest.raises(ValueError, match="PWM3"):
+        module["validate_backplate_policy"](bad)
 
 
 def test_session_policy_command_saves_the_file_and_ends_a_takeover(board):
