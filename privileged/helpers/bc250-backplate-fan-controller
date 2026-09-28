@@ -29,6 +29,7 @@ PWM_CHANNEL = 3
 PWM_HELPER = Path("/usr/libexec/bc250-control-center/bc250-fan-pwm-helper")
 TELEMETRY_PATH = Path("/run/apu_telemetry.json")
 STATUS_PATH = Path("/run/bc250-control-center/backplate-fan.json")
+POLICY_PATH = Path("/var/lib/bc250-control-center/backplate-fan-policy.json")
 
 TELEMETRY_MAX_AGE_SECONDS = 5.0
 SENSOR_TIMEOUT_SECONDS = 15.0
@@ -41,9 +42,8 @@ STARTUP_SAFE_PERCENT = 70
 FAILSAFE_PERCENT = 100
 CRITICAL_C = 95.0
 
-# Step curve requested for the reference BC250 enclosure.
-# Below 55 C the first point stays active.
-CURVE = (
+# Default reference curve.  The root-owned policy file can override it.
+DEFAULT_CURVE = (
     (0.0, 25),
     (50.0, 35),
     (55.0, 45),
@@ -52,6 +52,18 @@ CURVE = (
     (70.0, 90),
     (75.0, 100),
 )
+
+DEFAULT_POLICY = {
+    "schema": 1,
+    "pwm": PWM_CHANNEL,
+    "points": [[int(t), int(p)] for t, p in DEFAULT_CURVE],
+    "failsafe_percent": FAILSAFE_PERCENT,
+    "hysteresis_c": HYSTERESIS_C,
+    "deadband_percent": DEADBAND_PERCENT,
+    "max_down_step_percent": MAX_DOWN_STEP_PERCENT,
+    "sensor_timeout_seconds": SENSOR_TIMEOUT_SECONDS,
+    "critical_c": CRITICAL_C,
+}
 
 MEMORY_CHIP_COUNT = 8
 MEMORY_CODE_MAX = 80
@@ -151,9 +163,86 @@ def read_backplate_source(
     return gddr6_hotspot, "gddr6_hotspot", hotspot_chip
 
 
-def curve_percent(temperature: float) -> int:
-    target = int(CURVE[0][1])
-    for threshold, percent in CURVE:
+def _number(value, *, minimum: float, maximum: float, name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be numeric.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be numeric.") from None
+    if not math.isfinite(number) or not minimum <= number <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}.")
+    return number
+
+
+def validate_policy(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("Backplate fan policy must be a JSON object.")
+    if payload.get("schema") != 1:
+        raise ValueError("Unsupported backplate fan policy schema.")
+    if int(payload.get("pwm", -1)) != PWM_CHANNEL:
+        raise ValueError("Backplate fan policy must target PWM3.")
+    points = payload.get("points")
+    if not isinstance(points, list) or not 3 <= len(points) <= 8:
+        raise ValueError("Backplate fan curve needs between 3 and 8 points.")
+    normalized = []
+    previous = None
+    for point in points:
+        if not isinstance(point, list) or len(point) != 2:
+            raise ValueError("Each backplate curve point is [temperature, speed].")
+        temperature = int(_number(point[0], minimum=0, maximum=120, name="temperature"))
+        speed = int(_number(point[1], minimum=0, maximum=100, name="speed"))
+        if previous is not None and temperature <= previous:
+            raise ValueError("Backplate curve temperatures must be strictly increasing.")
+        normalized.append([temperature, speed])
+        previous = temperature
+    return {
+        "schema": 1,
+        "pwm": PWM_CHANNEL,
+        "points": normalized,
+        "failsafe_percent": int(_number(
+            payload.get("failsafe_percent", FAILSAFE_PERCENT),
+            minimum=40, maximum=100, name="failsafe_percent",
+        )),
+        "hysteresis_c": _number(
+            payload.get("hysteresis_c", HYSTERESIS_C),
+            minimum=0, maximum=10, name="hysteresis_c",
+        ),
+        "deadband_percent": int(_number(
+            payload.get("deadband_percent", DEADBAND_PERCENT),
+            minimum=0, maximum=20, name="deadband_percent",
+        )),
+        "max_down_step_percent": int(_number(
+            payload.get("max_down_step_percent", MAX_DOWN_STEP_PERCENT),
+            minimum=1, maximum=100, name="max_down_step_percent",
+        )),
+        "sensor_timeout_seconds": _number(
+            payload.get("sensor_timeout_seconds", SENSOR_TIMEOUT_SECONDS),
+            minimum=3, maximum=300, name="sensor_timeout_seconds",
+        ),
+        "critical_c": _number(
+            payload.get("critical_c", CRITICAL_C),
+            minimum=50, maximum=125, name="critical_c",
+        ),
+    }
+
+
+def load_policy(path: Path = POLICY_PATH) -> dict:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return validate_policy(payload)
+    except FileNotFoundError:
+        return dict(DEFAULT_POLICY)
+    except (OSError, ValueError, TypeError):
+        # A malformed root policy is not a reason to stop cooling. Fall back
+        # to the reviewed reference defaults and surface the fallback in status.
+        return dict(DEFAULT_POLICY)
+
+
+def curve_percent(temperature: float, points=None) -> int:
+    curve = points if points is not None else DEFAULT_POLICY["points"]
+    target = int(curve[0][1])
+    for threshold, percent in curve:
         if temperature >= threshold:
             target = int(percent)
     return max(0, min(100, target))
@@ -191,6 +280,19 @@ class BackplateController:
         self.error = ""
         self.hotspot_chip: int | None = None
         self.last_source = ""
+        self.policy = load_policy()
+        self.policy_stamp: tuple[int, int] | None = None
+
+    def _reload_policy(self) -> None:
+        try:
+            info = POLICY_PATH.stat()
+            stamp = (info.st_mtime_ns, info.st_size)
+        except OSError:
+            stamp = None
+        if stamp == self.policy_stamp:
+            return
+        self.policy_stamp = stamp
+        self.policy = load_policy()
 
     def _target(self, now: float) -> tuple[int, str, float | None, int | None]:
         hotspot, source_name, chip = read_backplate_source(now=self.wall())
@@ -199,22 +301,23 @@ class BackplateController:
                 self.missing_since = now
             if self.last_percent is None:
                 return STARTUP_SAFE_PERCENT, "startup-safe", None, None
-            if now - self.missing_since >= SENSOR_TIMEOUT_SECONDS:
-                return FAILSAFE_PERCENT, "failsafe", None, None
+            if now - self.missing_since >= float(self.policy["sensor_timeout_seconds"]):
+                return int(self.policy["failsafe_percent"]), "failsafe", None, None
             return self.last_percent, "sensor-wait", None, None
 
         self.missing_since = None
-        if hotspot >= CRITICAL_C:
-            return FAILSAFE_PERCENT, "critical", hotspot, chip
+        if hotspot >= float(self.policy["critical_c"]):
+            return int(self.policy["failsafe_percent"]), "critical", hotspot, chip
 
-        percent = curve_percent(hotspot)
+        percent = curve_percent(hotspot, self.policy["points"])
         if self.last_percent is not None and self.last_temperature is not None:
-            if abs(hotspot - self.last_temperature) < HYSTERESIS_C:
+            if abs(hotspot - self.last_temperature) < float(self.policy["hysteresis_c"]):
                 percent = self.last_percent
-            if abs(percent - self.last_percent) <= DEADBAND_PERCENT:
+            if abs(percent - self.last_percent) <= int(self.policy["deadband_percent"]):
                 percent = self.last_percent
-            if percent < self.last_percent - MAX_DOWN_STEP_PERCENT:
-                percent = self.last_percent - MAX_DOWN_STEP_PERCENT
+            max_down = int(self.policy["max_down_step_percent"])
+            if percent < self.last_percent - max_down:
+                percent = self.last_percent - max_down
         return percent, source_name or "gddr6_hotspot", hotspot, chip
 
     def _read_back(self) -> tuple[int | None, int | None]:
@@ -259,6 +362,7 @@ class BackplateController:
 
     def step(self) -> None:
         now = self.clock()
+        self._reload_policy()
         if self.backend["find_sensor"]() is None:
             self.state = "waiting-driver"
             return
@@ -304,9 +408,14 @@ class BackplateController:
             ),
             "sensor": self.last_source if hasattr(self, "last_source") and self.last_source else "gddr6_hotspot",
             "hotspot_chip": self.hotspot_chip,
-            "curve": [[temperature, percent] for temperature, percent in CURVE],
-            "critical_c": CRITICAL_C,
-            "failsafe_percent": FAILSAFE_PERCENT,
+            "curve": [list(point) for point in self.policy["points"]],
+            "critical_c": self.policy["critical_c"],
+            "failsafe_percent": self.policy["failsafe_percent"],
+            "hysteresis_c": self.policy["hysteresis_c"],
+            "deadband_percent": self.policy["deadband_percent"],
+            "max_down_step_percent": self.policy["max_down_step_percent"],
+            "sensor_timeout_seconds": self.policy["sensor_timeout_seconds"],
+            "policy_path": str(POLICY_PATH),
         }
 
     def publish(self) -> None:
