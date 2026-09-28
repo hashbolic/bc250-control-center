@@ -5,10 +5,11 @@ Hashbolic BC250 reference hardware mapping:
   PWM2 -> main CPU/GPU fan (owned by the standard Control Center fan policy)
   PWM3 -> backplate/GDDR6 fan (owned by this service)
 
-The backplate fan follows the hottest of the eight GDDR6 chips published by
-BC250-Telemetry in /run/apu_telemetry.json.  The service never touches the SMU
-mailbox itself: if telemetry is unavailable or stale it fails safe instead of
-starting a second memory-temperature sampler.
+The backplate fan follows the hotter of the GDDR6 hotspot and GPU VRM
+temperature published by BC250-Telemetry in /run/apu_telemetry.json.  This
+matches the reference CoolerControl policy used on this board.  The service
+never touches the SMU mailbox itself: if telemetry is unavailable or stale it
+fails safe instead of starting a second memory-temperature sampler.
 """
 from __future__ import annotations
 
@@ -44,11 +45,12 @@ CRITICAL_C = 95.0
 # Below 55 C the first point stays active.
 CURVE = (
     (0.0, 25),
-    (55.0, 35),
-    (65.0, 50),
-    (75.0, 70),
-    (85.0, 90),
-    (90.0, 100),
+    (50.0, 35),
+    (55.0, 45),
+    (60.0, 60),
+    (65.0, 75),
+    (70.0, 90),
+    (75.0, 100),
 )
 
 MEMORY_CHIP_COUNT = 8
@@ -97,33 +99,53 @@ def _fresh_payload(
     return payload if isinstance(payload, dict) else {}
 
 
-def read_gddr6_hotspot(
+def read_backplate_source(
     path: Path = TELEMETRY_PATH,
     *,
     now: float | None = None,
-) -> tuple[float | None, int | None]:
-    """Return (hotspot_c, chip_index) from BC250-Telemetry, or (None, None)."""
+) -> tuple[float | None, str | None, int | None]:
+    """Return (temperature_c, source, chip_index) for the backplate policy."""
     payload = _fresh_payload(path, now=now)
-    memory = payload.get("memory") if isinstance(payload, dict) else None
-    if not isinstance(memory, dict):
-        return None, None
-    if memory.get("status") != "ok" or memory.get("valid") is not True:
-        return None, None
-    raw = memory.get("raw")
-    if not isinstance(raw, list) or len(raw) != MEMORY_CHIP_COUNT:
-        return None, None
+    if not isinstance(payload, dict):
+        return None, None, None
 
-    temperatures: list[float] = []
-    for word in raw:
-        if type(word) is not int or not 0 <= word <= 0xFFFFFFFF:
-            return None, None
-        code = word & 0xFF
-        if code > MEMORY_CODE_MAX:
-            return None, None
-        temperatures.append(float(code * 2 - 40))
+    gddr6_hotspot = None
+    hotspot_chip = None
+    memory = payload.get("memory")
+    if isinstance(memory, dict) and memory.get("status") == "ok" and memory.get("valid") is True:
+        raw = memory.get("raw")
+        if isinstance(raw, list) and len(raw) == MEMORY_CHIP_COUNT:
+            temperatures: list[float] = []
+            valid = True
+            for word in raw:
+                if type(word) is not int or not 0 <= word <= 0xFFFFFFFF:
+                    valid = False
+                    break
+                code = word & 0xFF
+                if code > MEMORY_CODE_MAX:
+                    valid = False
+                    break
+                temperatures.append(float(code * 2 - 40))
+            if valid:
+                gddr6_hotspot = max(temperatures)
+                hotspot_chip = temperatures.index(gddr6_hotspot)
 
-    hotspot = max(temperatures)
-    return hotspot, temperatures.index(hotspot)
+    gpu_vrm = None
+    hardware = payload.get("hardware")
+    gpu = hardware.get("gpu") if isinstance(hardware, dict) else None
+    if isinstance(gpu, dict) and gpu.get("valid") is True:
+        try:
+            value = float(gpu.get("temp"))
+        except (TypeError, ValueError):
+            value = float("nan")
+        if math.isfinite(value) and 0.0 < value <= 130.0:
+            gpu_vrm = value
+
+    if gddr6_hotspot is None and gpu_vrm is None:
+        return None, None, None
+    if gpu_vrm is not None and (gddr6_hotspot is None or gpu_vrm > gddr6_hotspot):
+        return gpu_vrm, "gpu_vrm", None
+    return gddr6_hotspot, "gddr6_hotspot", hotspot_chip
 
 
 def curve_percent(temperature: float) -> int:
@@ -165,9 +187,10 @@ class BackplateController:
         self.state = "starting"
         self.error = ""
         self.hotspot_chip: int | None = None
+        self.last_source = ""
 
     def _target(self, now: float) -> tuple[int, str, float | None, int | None]:
-        hotspot, chip = read_gddr6_hotspot(now=self.wall())
+        hotspot, source_name, chip = read_backplate_source(now=self.wall())
         if hotspot is None:
             if self.missing_since is None:
                 self.missing_since = now
@@ -189,7 +212,7 @@ class BackplateController:
                 percent = self.last_percent
             if percent < self.last_percent - MAX_DOWN_STEP_PERCENT:
                 percent = self.last_percent - MAX_DOWN_STEP_PERCENT
-        return percent, "gddr6", hotspot, chip
+        return percent, source_name or "gddr6_hotspot", hotspot, chip
 
     def _read_back(self) -> tuple[int | None, int | None]:
         sensor = self.backend["find_sensor"]()
@@ -227,6 +250,7 @@ class BackplateController:
         self.last_percent = percent
         self.last_temperature = temperature
         self.hotspot_chip = chip
+        self.last_source = source
         self.state = "active"
         self.error = ""
 
@@ -256,6 +280,8 @@ class BackplateController:
         if self.state != "error":
             self.state = "active"
             self.hotspot_chip = chip
+            if source:
+                self.last_source = source
             if temperature is not None:
                 self.last_temperature = temperature
 
@@ -273,7 +299,7 @@ class BackplateController:
                 None if self.last_temperature is None
                 else round(self.last_temperature, 1)
             ),
-            "sensor": "gddr6_hotspot",
+            "sensor": self.last_source if hasattr(self, "last_source") and self.last_source else "gddr6_hotspot",
             "hotspot_chip": self.hotspot_chip,
             "curve": [[temperature, percent] for temperature, percent in CURVE],
             "critical_c": CRITICAL_C,
