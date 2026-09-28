@@ -30,9 +30,11 @@ from PyQt6.QtGui import (
     QPen,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QComboBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -1222,6 +1224,9 @@ class FanCurveScale(QWidget):
     """
 
     point_moved = pyqtSignal(int, int, int)
+    point_added = pyqtSignal(int, int)
+    point_removed = pyqtSignal(int)
+    point_selected = pyqtSignal(int)
 
     MIN_TEMPERATURE = 30.0
     MAX_TEMPERATURE = 95.0
@@ -1240,10 +1245,15 @@ class FanCurveScale(QWidget):
         self.enabled = False
         self.compact = False
         self.hovered: int | None = None
+        self.selected: int | None = None
         self.dragged: int | None = None
+        self.axis_min: float | None = None
+        self.axis_max: float | None = None
+        self.actual_duty: float | None = None
         self._plot = QRectF()
         self.setMinimumHeight(self.MINIMUM_HEIGHT)
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
     def set_state(
@@ -1271,9 +1281,39 @@ class FanCurveScale(QWidget):
         self.updateGeometry()
         self.update()
 
+    def set_axis_range(self, minimum: float | None, maximum: float | None) -> None:
+        if minimum is None or maximum is None:
+            self.axis_min = None
+            self.axis_max = None
+        else:
+            low = max(0.0, min(119.0, float(minimum)))
+            high = max(low + 1.0, min(120.0, float(maximum)))
+            self.axis_min, self.axis_max = low, high
+        self.update()
+
+    def set_actual_duty(self, duty: float | None) -> None:
+        self.actual_duty = None if duty is None else self._bounded_duty(duty)
+        self.update()
+
     def temperature_range(self) -> tuple[float, float]:
-        """Axis bounds in whole 5 °C steps around the points and the reading."""
+        """Axis bounds in whole 5 °C steps, or the user's explicit editor range."""
+        if self.axis_min is not None and self.axis_max is not None:
+            return self.axis_min, self.axis_max
         temperatures = [float(temperature) for temperature, _speed in self.points]
+        if self.actual_duty is not None:
+            actual_y = y_for(self.actual_duty)
+            actual = QColor(COLORS["cyan"])
+            painter.setPen(QPen(actual, 1.5, Qt.PenStyle.DashLine))
+            painter.drawLine(QPointF(plot.left(), actual_y), QPointF(plot.right(), actual_y))
+            duty_text = f"{int(round(self.actual_duty))}%"
+            duty_width = metrics.horizontalAdvance(duty_text) + 10
+            painter.setPen(actual)
+            painter.drawText(
+                QRectF(plot.right() - duty_width, actual_y - metrics.height() - 3, duty_width, metrics.height()),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                duty_text,
+            )
+
         if self.live_temperature is not None:
             temperatures.append(float(self.live_temperature))
         low = min([self.MIN_TEMPERATURE, *(value - 5 for value in temperatures)])
@@ -1331,15 +1371,83 @@ class FanCurveScale(QWidget):
         return temperature, duty
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API name
-        if event.button() == Qt.MouseButton.LeftButton:
-            index = self.point_at(event.position())
-            if index is not None:
-                self.dragged = index
-                self.hovered = index
-                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        index = self.point_at(event.position())
+        if event.button() == Qt.MouseButton.RightButton and index is not None:
+            self.selected = index
+            self.point_selected.emit(index)
+            if len(self.points) > 3:
+                self.point_removed.emit(index)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton and index is not None:
+            self.selected = index
+            self.point_selected.emit(index)
+            self.dragged = index
+            self.hovered = index
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.point_at(event.position()) is None
+            and not self._plot.isEmpty()
+            and len(self.points) < 8
+        ):
+            low, high = self.temperature_range()
+            x = max(self._plot.left(), min(self._plot.right(), event.position().x()))
+            y = max(self._plot.top(), min(self._plot.bottom(), event.position().y()))
+            temperature = round(
+                low + ((x - self._plot.left()) / self._plot.width()) * (high - low)
+            )
+            duty = round(
+                ((self._plot.bottom() - y) / self._plot.height()) * 100
+            )
+            self.point_added.emit(
+                max(0, min(120, int(temperature))),
+                max(0, min(100, int(duty))),
+            )
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        index = self.selected
+        if index is not None and 0 <= index < len(self.points):
+            temperature, duty = self.points[index]
+            changed = False
+            if event.key() == Qt.Key.Key_Left:
+                temperature -= 1
+                changed = True
+            elif event.key() == Qt.Key.Key_Right:
+                temperature += 1
+                changed = True
+            elif event.key() == Qt.Key.Key_Up:
+                duty += 1
+                changed = True
+            elif event.key() == Qt.Key.Key_Down:
+                duty -= 1
+                changed = True
+            elif event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace} and len(self.points) > 3:
+                self.point_removed.emit(index)
                 event.accept()
                 return
-        super().mousePressEvent(event)
+            if changed:
+                if index > 0:
+                    temperature = max(temperature, self.points[index - 1][0] + 1)
+                if index + 1 < len(self.points):
+                    temperature = min(temperature, self.points[index + 1][0] - 1)
+                temperature = max(0, min(120, temperature))
+                duty = max(0, min(100, duty))
+                self.points[index] = (temperature, duty)
+                self.point_moved.emit(index, temperature, duty)
+                self.update()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API name
         if self.dragged is not None:
@@ -1489,7 +1597,7 @@ class FanCurveScale(QWidget):
         painter.setFont(number_font)
         for index, (threshold, duty) in enumerate(points):
             center = QPointF(x_for(threshold), y_for(duty))
-            radius = 10.0 if index == self.hovered else 8.0
+            radius = 11.0 if index == self.selected else (10.0 if index == self.hovered else 8.0)
             painter.setPen(QPen(line_color, 2))
             painter.setBrush(QColor(COLORS["panel_raised"]))
             painter.drawEllipse(center, radius, radius)
@@ -1583,6 +1691,12 @@ class FanCurvePlot(QWidget):
         """The channel the curve drives, named in the live tag."""
         self.target_pwm = pwm
         self._render()
+
+    def set_axis_range(self, minimum: float | None, maximum: float | None) -> None:
+        self.scale.set_axis_range(minimum, maximum)
+
+    def set_actual_duty(self, duty: float | None) -> None:
+        self.scale.set_actual_duty(duty)
 
     def set_compact(self, compact: bool) -> None:
         self.compact = bool(compact)
