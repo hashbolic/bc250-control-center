@@ -1360,7 +1360,7 @@ class FanCurveScale(QWidget):
         y = max(self._plot.top(), min(self._plot.bottom(), position.y()))
         temperature = round(low + ((x - self._plot.left()) / self._plot.width()) * (high - low))
         duty = round(((self._plot.bottom() - y) / self._plot.height()) * 100)
-        temperature = max(int(self.MIN_TEMPERATURE), min(int(self.MAX_TEMPERATURE), int(temperature)))
+        temperature = max(int(math.ceil(low)), min(int(math.floor(high)), int(temperature)))
         duty = max(0, min(100, int(duty)))
 
         # Curve thresholds must remain strictly increasing. CoolerControl-style
