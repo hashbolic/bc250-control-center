@@ -1957,7 +1957,7 @@ def application_stylesheet(mode: str | None = None, accent: str | None = None, d
         color: {c['muted']};
         font-size: 10px;
     }}
-    QSpinBox, QComboBox, QLineEdit {{
+    QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit {{
         background: {c['control']};
         border: 1px solid {c['border']};
         border-radius: 11px;
@@ -1966,7 +1966,7 @@ def application_stylesheet(mode: str | None = None, accent: str | None = None, d
         font-weight: 710;
         selection-background-color: {c['blue_soft']};
     }}
-    QSpinBox:focus, QComboBox:focus, QLineEdit:focus {{
+    QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus, QLineEdit:focus {{
         border-color: {c['focus']};
     }}
     QPlainTextEdit#OperationConsole {{
@@ -2814,11 +2814,11 @@ def application_stylesheet(mode: str | None = None, accent: str | None = None, d
        default, which left a grey stub hanging off every numeric field in both
        redesigned modules. Place them inside the frame and give them the same
        chevrons the rest of the interface uses. */
-    QWidget[redesignedModule='true'] QSpinBox {{
+    QWidget[redesignedModule='true'] QSpinBox,\n    QWidget[redesignedModule='true'] QDoubleSpinBox {{
         padding-right: 24px;
     }}
     QWidget[redesignedModule='true'] QSpinBox::up-button,
-    QWidget[redesignedModule='true'] QSpinBox::down-button {{
+    QWidget[redesignedModule='true'] QSpinBox::down-button,\n    QWidget[redesignedModule='true'] QDoubleSpinBox::down-button {{
         subcontrol-origin: border;
         subcontrol-position: top right;
         width: 20px;
@@ -2828,7 +2828,7 @@ def application_stylesheet(mode: str | None = None, accent: str | None = None, d
         border: none;
         border-radius: 5px;
     }}
-    QWidget[redesignedModule='true'] QSpinBox::down-button {{
+    QWidget[redesignedModule='true'] QSpinBox::down-button,\n    QWidget[redesignedModule='true'] QDoubleSpinBox::down-button {{
         subcontrol-position: bottom right;
         margin: 0px 4px 3px 0px;
     }}
@@ -2836,12 +2836,12 @@ def application_stylesheet(mode: str | None = None, accent: str | None = None, d
     QWidget[redesignedModule='true'] QSpinBox::down-button:hover {{
         background: {c['panel_alt']};
     }}
-    QWidget[redesignedModule='true'] QSpinBox::up-arrow {{
+    QWidget[redesignedModule='true'] QSpinBox::up-arrow,\n    QWidget[redesignedModule='true'] QDoubleSpinBox::up-arrow {{
         image: url({icon_dir}/chevron_up_gray.svg);
         width: 11px;
         height: 11px;
     }}
-    QWidget[redesignedModule='true'] QSpinBox::down-arrow {{
+    QWidget[redesignedModule='true'] QSpinBox::down-arrow,\n    QWidget[redesignedModule='true'] QDoubleSpinBox::down-arrow {{
         image: url({icon_dir}/chevron_down_gray.svg);
         width: 11px;
         height: 11px;
