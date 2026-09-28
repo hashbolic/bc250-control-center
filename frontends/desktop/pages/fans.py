@@ -1764,10 +1764,21 @@ class ReferenceCurveDialog(QDialog):
         self._actual_duty = actual_duty
         self._point_rows: list[CurvePoint] = []
         self.setWindowTitle(tr(title))
+        self.setObjectName("FansWorkspace")
+        self.setProperty("redesignedModule", True)
         self.setMinimumSize(860, 650)
         self.resize(980, 760)
         self.setModal(True)
-        self.setStyleSheet(application_stylesheet())
+        # A top-level QDialog does not inherit the Fans page's scoped QSS.
+        # Give it the current application palette plus the same fan-specific
+        # selectors, and explicitly paint its root surface so a light app does
+        # not fall back to KDE's dark window palette (or vice versa).
+        self.setStyleSheet(
+            application_stylesheet()
+            + "\n"
+            + fans_stylesheet()
+            + f"\nQWidget#FansWorkspace {{ background: {COLORS['window']}; }}"
+        )
 
         root = QVBoxLayout(self)
         root.setContentsMargins(18, 16, 18, 16)
@@ -1920,6 +1931,7 @@ class ReferenceCurveDialog(QDialog):
         root.addLayout(actions)
 
         self._load_policy()
+        localize_widget_tree(self)
 
     def _default_points(self) -> list[tuple[int, int]]:
         source = REFERENCE_MAIN_CURVE if self.pwm == 2 else REFERENCE_BACKPLATE_CURVE
