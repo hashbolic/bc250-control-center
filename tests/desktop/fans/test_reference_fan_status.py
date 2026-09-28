@@ -9,8 +9,17 @@ def test_reference_channel_map_is_pinned():
 
 
 def test_backplate_status_requires_fresh_heartbeat(tmp_path, monkeypatch):
+    main_status = tmp_path / "main-fan.json"
     status = tmp_path / "backplate-fan.json"
     wants = tmp_path / "backplate.service"
+    main_status.write_text(json.dumps({
+        "heartbeat": 100.0,
+        "state": "active",
+        "pwm": 2,
+        "temperature": 64.0,
+        "sensor": "gpu",
+        "percent": 40,
+    }), encoding="utf-8")
     status.write_text(json.dumps({
         "heartbeat": 100.0,
         "state": "active",
@@ -19,14 +28,19 @@ def test_backplate_status_requires_fresh_heartbeat(tmp_path, monkeypatch):
         "sensor": "gddr6_hotspot",
     }), encoding="utf-8")
     wants.symlink_to("/dev/null")
+    monkeypatch.setattr(reference_fan_control, "MAIN_STATUS_FILE", main_status)
     monkeypatch.setattr(reference_fan_control, "BACKPLATE_STATUS_FILE", status)
     monkeypatch.setattr(reference_fan_control, "BACKPLATE_UNIT_WANTS", wants)
 
     fresh = reference_fan_control.read_reference_fan_status(now=105.0)
     stale = reference_fan_control.read_reference_fan_status(now=120.0)
 
+    assert fresh["main_running"] is True
+    assert fresh["main"]["pwm"] == 2
     assert fresh["backplate_enabled"] is True
     assert fresh["backplate_running"] is True
     assert fresh["backplate"]["pwm"] == 3
+    assert stale["main_running"] is False
+    assert stale["main"] == {}
     assert stale["backplate_running"] is False
     assert stale["backplate"] == {}
