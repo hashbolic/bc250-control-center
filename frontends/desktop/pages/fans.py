@@ -1354,8 +1354,10 @@ class FanCurveScale(QWidget):
         # of invalidating the whole curve after the mouse is released.
         if index > 0:
             temperature = max(temperature, int(self.points[index - 1][0]) + 1)
+            duty = max(duty, int(self.points[index - 1][1]))
         if index + 1 < len(self.points):
             temperature = min(temperature, int(self.points[index + 1][0]) - 1)
+            duty = min(duty, int(self.points[index + 1][1]))
         return temperature, duty
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API name
@@ -1426,8 +1428,10 @@ class FanCurveScale(QWidget):
             if changed:
                 if index > 0:
                     temperature = max(temperature, self.points[index - 1][0] + 1)
+                    duty = max(duty, self.points[index - 1][1])
                 if index + 1 < len(self.points):
                     temperature = min(temperature, self.points[index + 1][0] - 1)
+                    duty = min(duty, self.points[index + 1][1])
                 temperature = max(0, min(120, temperature))
                 duty = max(0, min(100, duty))
                 self.points[index] = (temperature, duty)
@@ -1936,6 +1940,8 @@ class ReferenceCurveDialog(QDialog):
             temperature = max(minimum, temperature)
             if temperature > 120:
                 break
+            if result:
+                speed = max(speed, result[-1][1])
             result.append((temperature, speed))
         return result
 
@@ -2011,6 +2017,7 @@ class ReferenceCurveDialog(QDialog):
         for index, (temperature, speed) in enumerate(values, start=1):
             row = CurvePoint(tr_format("Point {index}", index=index), temperature, speed)
             row.temperature.setRange(0, 120)
+            row.set_values(temperature, speed)
             row.changed.connect(self._rows_changed)
             self.points_layout.addWidget(row)
             self._point_rows.append(row)
