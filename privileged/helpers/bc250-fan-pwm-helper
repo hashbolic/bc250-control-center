@@ -63,6 +63,7 @@ CONTROL_INTERVAL_SECONDS = 2.0
 CONTROL_VERIFY_SECONDS = 30.0
 CONTROL_MIN_REWRITE_SECONDS = 5.0
 CONTROL_SENSORS = ('gpu', 'cpu', 'vrm', 'board')
+CONTROL_CURVE_SENSORS = frozenset({'gpu', 'cpu'})
 DEFAULT_CRITICAL_C = {'gpu': 95.0, 'cpu': 95.0, 'vrm': 105.0, 'board': 90.0}
 
 
@@ -642,6 +643,7 @@ class FanController:
         effective = {
             sensor: value + policy['offsets_c'][sensor]
             for sensor, value in readings.items()
+            if sensor in CONTROL_CURVE_SENSORS
         }
         hottest = max(effective.items(), key=lambda item: item[1]) if effective else (None, None)
         if policy['mode'] != 'curve':
