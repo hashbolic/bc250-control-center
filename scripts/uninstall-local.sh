@@ -32,6 +32,8 @@ METAINFO_DIR="$PREFIX/share/metainfo"
 SYSTEMD_USER_DIR="$PREFIX/lib/systemd/user"
 DOC_DIR="$PREFIX/share/doc/bc250-control-center"
 SYSTEM_PRIV_HELPER="/usr/libexec/bc250-control-center/bc250-fan-pwm-helper"
+SYSTEM_BACKPLATE_FAN_HELPER="/usr/libexec/bc250-control-center/bc250-backplate-fan-controller"
+SYSTEM_BACKPLATE_FAN_SERVICE="/etc/systemd/system/bc250-backplate-fan.service"
 SYSTEM_STEAMOS_GAME_HELPER="/usr/libexec/bc250-control-center/bc250-steamos-game-helper"
 SYSTEM_CU_HELPER="/usr/libexec/bc250-control-center/bc250-cu-helper"
 SYSTEM_GOVERNOR_CONFIG_HELPER="/usr/libexec/bc250-control-center/bc250-governor-config-helper"
@@ -145,9 +147,22 @@ disable_managed_fan_service() {
   # drops its policy first. It refuses to touch a unit it did not write.
   local unit="/etc/systemd/system/bc250-fan-control.service"
   local openrc_unit="/etc/init.d/bc250-fan-control"
-  [[ -f "$unit" || -f "$openrc_unit" ]] || return 0
+  local backplate_unit="$SYSTEM_BACKPLATE_FAN_SERVICE"
+  [[ -f "$unit" || -f "$openrc_unit" || -f "$backplate_unit" ]] || return 0
   [[ -x "$SYSTEM_PRIV_HELPER" ]] || return 0
   echo "Disabling BC250 system fan control because it depends on the helper being uninstalled."
+  if [[ -f "$backplate_unit" ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      echo "Would disable: bc250-backplate-fan.service"
+    elif [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+      systemctl disable --now bc250-backplate-fan.service >/dev/null 2>&1 || true
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo systemctl disable --now bc250-backplate-fan.service >/dev/null 2>&1 || true
+    else
+      echo "Error: disable bc250-backplate-fan.service before uninstalling." >&2
+      return 1
+    fi
+  fi
   if [[ "$DRY_RUN" -eq 1 ]]; then
     return 0
   fi
@@ -344,6 +359,8 @@ else
   done
 fi
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-fan-pwm-helper" "$SYSTEM_PRIV_HELPER"
+remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-backplate-fan-controller" "$SYSTEM_BACKPLATE_FAN_HELPER"
+remove_managed_privileged_file "$APP_DIR/packaging/common/bc250-backplate-fan.service" "$SYSTEM_BACKPLATE_FAN_SERVICE"
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-steamos-game-helper" "$SYSTEM_STEAMOS_GAME_HELPER"
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-cu-helper" "$SYSTEM_CU_HELPER"
 remove_managed_privileged_file "$APP_DIR/privileged/helpers/bc250-governor-config-helper" "$SYSTEM_GOVERNOR_CONFIG_HELPER"
