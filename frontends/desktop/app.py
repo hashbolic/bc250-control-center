@@ -280,6 +280,12 @@ class ControlCenterWindow(QMainWindow):
         self.welcome: WelcomeOverlay | None = None
         self.tour: TourGuide | None = None
         self._first_run_pending = first_run_pending(self.settings)
+        # BC250-Deploy production images provision dependencies and the
+        # qualified hardware profile before the desktop application can start.
+        # Do not ask the customer to install the same components again.
+        if Path("/var/lib/bc250-console/control-center-provision-v1.ok").is_file():
+            mark_first_run_done(self.settings)
+            self._first_run_pending = False
         # Everything built after the first appearance pass (the sidebar, the
         # pages, the console) joins the chosen density here.
         apply_layout_density(self)
