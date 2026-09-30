@@ -281,7 +281,7 @@ class ConfiguracionLocal:
             'version': 1,
             'gpu': {
                 'seguro': {'min': 500, 'max': 1500, 'descripcion': 'Uso diario seguro'},
-                'gaming': {'min': 1000, 'max': 1850, 'descripcion': 'Gaming moderado'},
+                'gaming': {'min': 1000, 'max': 1970, 'descripcion': 'BC250 Console balanced'},
                 'benchmark_controlado': {'min': 1000, 'max': 2000, 'descripcion': 'Solo pruebas controladas'},
                 'recuperacion': {'min': 500, 'max': 1000, 'descripcion': 'Bajar consumo y temperatura'},
             },
