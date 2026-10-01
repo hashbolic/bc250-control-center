@@ -1271,12 +1271,11 @@ class Plugin:
             return {"ok": False, "applied": False, "error": status.get("error"), "session": None}
         self._decorate_status(status)
         gpu_key, safe_point = _current_gpu_choice(status)
-        live_fan = status.get("system_fan_preset")
         snapshot = {
             "gpu": gpu_key,
             "gpu_safe_point": safe_point,
-            "fan": live_fan if live_fan in GAME_FAN_PRESETS else None,
-            "fan_service": status.get("system_fan_policy") is True,
+            "fan": None,
+            "fan_service": False,
         }
         applied: dict[str, str | None] = {"gpu": None, "fan": None}
         errors: list[str] = []
@@ -1286,19 +1285,13 @@ class Plugin:
                 errors.append(str(result.get("error") or "GPU profile failed."))
             else:
                 applied["gpu"] = str(entry["gpu"])
-        if entry.get("fan") and entry["fan"] != snapshot["fan"]:
-            result = self._record_action("fan", f"game-{entry['fan']}", self._run("fan-system", str(entry["fan"]), timeout=30))
-            if result.get("ok") is False:
-                errors.append(str(result.get("error") or "Fan preset failed."))
-            else:
-                applied["fan"] = str(entry["fan"])
         session = (
             {"app_id": app_id, "name": name, "snapshot": snapshot, "applied": applied}
-            if applied["gpu"] or applied["fan"] else None
+            if applied["gpu"] else None
         )
         return {
             "ok": not errors, "applied": session is not None, "name": name,
-            "gpu": applied["gpu"], "fan": applied["fan"],
+            "gpu": applied["gpu"], "fan": None,
             "error": " ".join(errors), "session": session,
         }
 
