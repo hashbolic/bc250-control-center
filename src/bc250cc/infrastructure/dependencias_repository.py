@@ -713,6 +713,16 @@ class DependenciasRepository:
             titles[action],
         )
 
+    @staticmethod
+    def _bc250_appliance_mode() -> bool:
+        """True on the pre-provisioned BC250 Console image.
+
+        Appliance mode means the immutable image owns the runtime, governor,
+        CPU SMU stack and cooling backend. CU/UMR remain deliberately outside
+        this contract because CU qualification is board-specific.
+        """
+        return Path("/etc/bc250-console/appliance-mode").is_file()
+
     def estado_herramientas_bc250(self):
         ahora = time.monotonic()
         if self.estado_herramientas_cache is not None and ahora - self.estado_herramientas_cache_time < 10:
@@ -775,21 +785,41 @@ class DependenciasRepository:
             if init_manager.kind == 'openrc' else {}
         )
         selected_detection = governor_context['detected'].get(selected_governor, {})
+        appliance_mode = self._bc250_appliance_mode()
+        nct_hwmon_present = any(
+            path.is_file()
+            and path.read_text(encoding='utf-8', errors='ignore').strip() in {'nct6686', 'nct6687'}
+            for path in Path('/sys/class/hwmon').glob('hwmon*/name')
+        )
+        installed_components = {
+            'runtime': bool(runtime_probe['python3'] and runtime_probe['git']),
+            'governor': bool(
+                selected_detection.get('detected')
+                if selected_detection
+                else governor_probe['command']
+            ),
+            'cpu_oc': bool(repository_probe['smu_exists'] or shutil.which('bc250-apply')),
+            'core_unlock': repository_probe['core_unlock_script_exists'],
+            'umr': bool(runtime_probe['umr']),
+            'cu_manager': cu_selection.exists,
+            'fan_pwm': bool(nct_hwmon_present),
+        }
+        if appliance_mode:
+            # The immutable console image owns these pieces. Do not ask the
+            # owner to "Prepare" things that are already baked/provisioned.
+            # CU remains intentionally manual and board-qualified.
+            installed_components.update({
+                'runtime': True,
+                'governor': bool(governor_probe['command']),
+                'cpu_oc': bool(shutil.which('bc250-apply')),
+                'core_unlock': True,  # firmware-visible core topology; no source checkout required
+                'fan_pwm': bool(nct_hwmon_present),
+                'umr': False,
+                'cu_manager': False,
+            })
         component_capabilities = mark_component_installation(
             self._component_capabilities(os_info),
-            {
-                'runtime': bool(runtime_probe['python3'] and runtime_probe['git']),
-                'governor': bool(
-                    selected_detection.get('detected')
-                    if selected_detection
-                    else governor_probe['command']
-                ),
-                'cpu_oc': repository_probe['smu_exists'],
-                'core_unlock': repository_probe['core_unlock_script_exists'],
-                'umr': bool(runtime_probe['umr']),
-                'cu_manager': cu_selection.exists,
-                'fan_pwm': Path('/sys/module/nct6687').is_dir(),
-            },
+            installed_components,
         )
         resultado = {
             'governor_cmd': governor_probe['command'],
@@ -839,6 +869,7 @@ class DependenciasRepository:
             'os_family': os_info.family,
             'os_label': os_info.label,
             'os_immutable': os_info.immutable,
+            'bc250_appliance_mode': appliance_mode,
             'masta_bc250_stack_supported': masta_bc250_stack_supported(
                 distro_id=os_info.distro_id,
                 family=os_info.family,
