@@ -182,7 +182,6 @@ class ControlCenterWindow(QMainWindow):
         from .pages.compute_units import ComputeUnitsPage
         from .pages.cpu_smu import CpuSmuPage
         from .pages.dashboard import DashboardPage
-        from .pages.fans import FansPage
         from .pages.firmware import FirmwarePage
         from .pages.gpu_governor import GpuGovernorPage
         from .pages.performance import PerformancePage
