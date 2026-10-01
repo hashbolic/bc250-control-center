@@ -863,9 +863,15 @@ class PreparationComponentCard(QFrame):
     def set_capability(self, capability: Mapping[str, object]) -> None:
         available = bool(capability.get("available", True))
         installed = bool(capability.get("installed", False))
+        appliance_managed = bool(capability.get("appliance_managed", False))
         self.setProperty("installed", installed)
         self.setProperty("available", available)
-        self.checkbox.setEnabled(available and self.key != "runtime")
+        self.setProperty("applianceManaged", appliance_managed)
+        if appliance_managed:
+            self.checkbox.setChecked(True)
+            self.checkbox.setEnabled(False)
+        else:
+            self.checkbox.setEnabled(available and self.key != "runtime")
         self.setCursor(
             Qt.CursorShape.PointingHandCursor
             if self.checkbox.isEnabled()
@@ -2218,11 +2224,18 @@ class PreparationSidebar(QFrame):
 
     @property
     def selected_components(self) -> set[str]:
-        return {
-            key
-            for key, card in self.component_cards.items()
-            if card.checkbox.isChecked()
-        }
+        selected = set()
+        for key, card in self.component_cards.items():
+            if not card.checkbox.isChecked():
+                continue
+            # Appliance-managed items are shown checked because they are
+            # already provisioned, but must not be reinstalled when the owner
+            # later prepares CU tooling. Runtime stays as the prerequisite
+            # token expected by the preparation workflow.
+            if card.property("applianceManaged") and key != "runtime":
+                continue
+            selected.add(key)
+        return selected
 
     def _emit_prepare(self) -> None:
         self.prepare_requested.emit(
@@ -2873,13 +2886,22 @@ class PreparationSidebar(QFrame):
             "fan_pwm": bool(getattr(state, "nct_ready", False)),
         }
         installed_values = []
+        appliance_mode = bool(tools.get("bc250_appliance_mode"))
+        appliance_ready_values = []
         for key, card in self.component_cards.items():
             capability = _mapping(capabilities.get(key))
             if not capability:
                 capability = {"available": True, "installed": fallback[key]}
             card.set_capability(capability)
-            installed_values.append(bool(capability.get("installed")))
-        all_ready = bool(installed_values) and all(installed_values)
+            installed = bool(capability.get("installed"))
+            installed_values.append(installed)
+            if key not in {"umr", "cu_manager"}:
+                appliance_ready_values.append(installed)
+        all_ready = (
+            bool(appliance_ready_values) and all(appliance_ready_values)
+            if appliance_mode
+            else bool(installed_values) and all(installed_values)
+        )
         known = (
             bool(tools)
             or bool(getattr(state, "tools_state_available", False))
