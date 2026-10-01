@@ -173,7 +173,7 @@ class GpuProfile:
 
 DEFAULT_PROFILES: tuple[GpuProfile, ...] = (
     GpuProfile("balanced", "Balanced", 500, 1500),
-    GpuProfile("gaming", "Gaming", 1000, 1850),
+    GpuProfile("gaming", "Gaming", 1000, 1970),
     GpuProfile("benchmark", "Benchmark", 1000, 2000),
 )
 
