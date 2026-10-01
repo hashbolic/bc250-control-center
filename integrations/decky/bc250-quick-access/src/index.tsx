@@ -1090,7 +1090,7 @@ function MemoryTab({ state, busy, execute }: { state: Status; busy: boolean; exe
 }
 
 type PanelTab = "board" | "monitor" | "memory" | "settings";
-type BoardSection = "gpu" | "cu" | "cpu" | "fan";
+type BoardSection = "gpu" | "cu" | "cpu";
 
 function Content() {
   const [state, setState] = useState<Status>({});
@@ -1363,7 +1363,6 @@ function Content() {
       { key: "gpu", label: "GPU", icon: <FaMicrochip />, color: accent.focus, colorSoft: accent.focus_soft },
       { key: "cu", label: text.compute, icon: <FaTh />, color: accent.focus, colorSoft: accent.focus_soft },
       { key: "cpu", label: "CPU", icon: <FaBolt />, color: accent.focus, colorSoft: accent.focus_soft },
-      { key: "fan", label: text.fan, icon: <FaFan />, color: accent.focus, colorSoft: accent.focus_soft },
     ]} />
 
     {busy && boardSection !== "cpu" ? <div style={{ alignItems: "center", background: accent.focus_soft, border: `1px solid ${accent.focus}`, borderRadius: 7, color: accent.focus, display: "flex", fontSize: 10, gap: 6, marginBottom: 10, padding: "7px 9px" }}><FaClock />{text.operationInProgress}</div> : null}
@@ -1424,15 +1423,7 @@ function Content() {
       <div style={{ marginTop: 6, minHeight: 36 }}><ActionRow><Action label={text.install} disabled={busy || !activeMatchesTarget || Boolean(state.cpu_service_enabled)} onActivate={() => confirmCpu("install")} /><Action label={text.remove} danger disabled={busy || (!state.cpu_service_installed && !state.cpu_service_enabled)} onActivate={() => showModal(<ConfirmModal strTitle={text.remove} strDescription={text.serviceRemovedBootProfile} strOKButtonText={text.remove} bDestructiveWarning onOK={() => void execute("BC250 CPU", removeCpuService, "cpu")} />)} /></ActionRow></div>
     </section> : null}
 
-    {boardSection === "fan" ? <section style={{ marginBottom: 12 }}><SectionTitle kind="fan" title={text.fan} />
-      <FanPresetRow state={state} busy={busy} execute={execute} />
-      <PadButton disabled={busy} onActivate={() => setFanOpen(!fanOpen)} style={{ alignItems: "center", display: "flex", fontSize: 11, height: 34, justifyContent: "space-between", marginBottom: 6, padding: "5px 9px", width: "100%" }}><span>{liveFan?.label ?? `PWM ${fanChannel}`} · {fanDetected ? text.detected : text.unavailable}</span><span style={{ color: accent.focus }}>{fanOpen ? "▴" : "▾"}</span></PadButton>
-      {fanOpen ? <Focusable flow-children="grid" navEntryPreferPosition={NavEntryPositionPreferences.PREFERRED_CHILD} style={{ display: "grid", gap: 5, gridTemplateColumns: "1fr 1fr", marginBottom: 7 }}>{fanChannels.map((channel) => { const option = state.fan_channel_options?.find((item) => item.channel === channel); const available = detectedFans.includes(channel); return <PadButton key={channel} disabled={busy || !available} preferredFocus={channel === fanChannel} onActivate={() => { selectionRef.current.fan = channel; setFanChannel(channel); setFanOpen(false); dirty.current.fan = false; const percent = option?.percent; if (percent != null) setFanDuty(percent); }} style={{ background: channel === fanChannel ? accent.focus_soft : tokens.colors.panel_raised, border: `1px solid ${channel === fanChannel ? accent.focus : tokens.colors.border}`, color: channel === fanChannel ? accent.focus : tokens.colors.text, fontSize: 10, height: 34, padding: 4, width: "100%" }}>PWM {channel} · {available ? `${option?.percent ?? "—"}%` : text.unavailable}</PadButton>; })}</Focusable> : null}
-      {liveFan ? <div style={{ color: liveFan.rpm_observed ? tokens.colors.subtle : tokens.colors.amber, fontSize: 9, lineHeight: 1.3, margin: "0 2px 6px" }}>{liveFan.rpm_observed ? `${text.fanRpmObserved}: ${liveFan.rpm} RPM` : `${text.fanUnverified}. ${fanChannel === 2 ? text.fanWiring : ""}`}</div> : null}
-      <SliderField label={text.speed} value={fanDuty} min={fanMin} max={fanMax} step={fanStep} minimumDpadGranularity={fanStep} showValue valueSuffix="%" disabled={busy || !fanDetected} onChange={(value: number) => { dirty.current.fan = true; setFanDuty(Math.max(20, Math.min(100, Math.round(value / 5) * 5))); }} />
-      <Focusable flow-children="grid" style={{ display: "grid", gap: 6, gridTemplateColumns: "1fr 1fr", marginTop: 6 }}><Action label={text.apply} primary disabled={busy || !fanDetected} onActivate={() => void execute(`PWM ${fanChannel}`, () => applyFanChannel(fanChannel, fanDuty), "fan")} /><Action label={text.automatic} disabled={busy || !fanDetected} onActivate={() => void execute(`PWM ${fanChannel}`, () => applyFanChannel(fanChannel, "automatic"), "fan")} /></Focusable>
-    </section> : null}
-    </> : null}
+
 
   </SettingsContext.Provider>
   </Focusable>;
@@ -1492,7 +1483,6 @@ function GameProfileCard({ state, busy }: { state: Status; busy: boolean }) {
   const [listOpen, setListOpen] = useState(false);
   const [working, setWorking] = useState(false);
   const [draftGpu, setDraftGpu] = useState<string | null>(null);
-  const [draftFan, setDraftFan] = useState<string | null>(null);
   const load = useCallback(async () => {
     try { const result = await getGameProfiles(); if (result.ok !== false) setStore(result); } catch { /* retried on the next change */ }
   }, []);
@@ -1503,19 +1493,18 @@ function GameProfileCard({ state, busy }: { state: Status; busy: boolean }) {
   const active = Boolean(game && store.session?.app_id === game.appId);
   const enabled = store.enabled !== false;
   const gpuProfiles = state.gpu_profiles ?? [];
-  const fanPresets = state.fan_profiles ?? [];
-  const summary = (entry: { gpu: string | null; fan: string | null }) => `GPU ${gpuLabel(entry.gpu, gpuProfiles)} · ${text.fans} ${presetLabel(entry.fan, fanPresets)}`;
+  const summary = (entry: { gpu: string | null; fan: string | null }) => `GPU ${gpuLabel(entry.gpu, gpuProfiles)}`;
   const run = async (operation: () => Promise<GameStore | GameEvent>) => {
     if (working) return; setWorking(true);
     try { const result = await operation(); if (result.ok === false) toaster.toast({ title: text.perGameProfiles, body: localizedErrorSummary(result.error ?? text.error) }); }
     catch (error) { toaster.toast({ title: text.perGameProfiles, body: localizedErrorSummary(failed(error).error ?? text.error) }); }
     finally { setWorking(false); await load(); }
   };
-  const beginEdit = () => { setDraftGpu(saved?.gpu ?? null); setDraftFan(saved?.fan ?? null); setEditing(true); };
+  const beginEdit = () => { setDraftGpu(saved?.gpu ?? null); setEditing(true); };
   const save = () => {
     if (!game) return;
     void run(async () => {
-      const result = await saveGameProfile(game.appId, game.name, draftGpu, draftFan);
+      const result = await saveGameProfile(game.appId, game.name, draftGpu, null);
       if (result.ok === false) return result;
       setEditing(false);
       // Playing it right now: the new choice takes effect at once.
@@ -1556,14 +1545,9 @@ function GameProfileCard({ state, busy }: { state: Status; busy: boolean }) {
           {choice(null, draftGpu, text.unchanged, () => setDraftGpu(null), "gpu-none")}
           {gpuProfiles.map((profile) => choice(profile.key, draftGpu, profile.name, () => setDraftGpu(profile.key), `gpu-${profile.key}`))}
         </Focusable>
-        <div style={{ color: tokens.colors.subtle, fontSize: 9, margin: "0 2px 4px" }}>{text.fans}</div>
-        <Focusable flow-children="grid" style={{ display: "grid", gap: 4, gridTemplateColumns: "repeat(3,minmax(0,1fr))", marginBottom: 6 }}>
-          {choice(null, draftFan, text.unchanged, () => setDraftFan(null), "fan-none")}
-          {["quiet", "balanced", "boost", "automatic"].map((key) => choice(key, draftFan, presetLabel(key, fanPresets), () => setDraftFan(key), `fan-${key}`))}
-        </Focusable>
         <div style={{ color: tokens.colors.subtle, fontSize: 9, lineHeight: 1.35, margin: "0 2px 6px" }}>{text.gameCpuNote}</div>
         <ActionRow marginBottom={6}>
-          <Action label={text.gameProfileSave} primary disabled={working || (!draftGpu && !draftFan)} onActivate={save} />
+          <Action label={text.gameProfileSave} primary disabled={working || !draftGpu} onActivate={save} />
           <Action label={text.cancel} disabled={working} onActivate={() => setEditing(false)} />
         </ActionRow>
       </div>}
