@@ -6,7 +6,7 @@ def test_cyan_profiles_follow_allowed_range():
 
     assert [(item.key, item.minimum_mhz, item.maximum_mhz) for item in profiles] == [
         ("balanced", 1000, 1500),
-        ("gaming", 1000, 1850),
+        ("gaming", 1000, 1970),
         ("benchmark", 1000, 2000),
     ]
 
