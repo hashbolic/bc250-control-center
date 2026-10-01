@@ -70,7 +70,7 @@ def profiles_for_allowed_range(
     else:
         candidates = (
             ("balanced", "Balanced", max(500, minimum), 1500),
-            ("gaming", "Gaming", max(1000, minimum), 1850),
+            ("gaming", "Gaming", max(1000, minimum), 1970),
             ("benchmark", "Benchmark", max(1000, minimum), 2000),
         )
     profiles: list[GpuProfile] = []
