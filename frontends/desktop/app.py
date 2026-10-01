@@ -198,12 +198,6 @@ class ControlCenterWindow(QMainWindow):
         )
         self.gpu_page = GpuGovernorPage(controller, settings_service=settings_service)
         self.cu_page = ComputeUnitsPage(controller, activity_service=activity_service)
-        self.fans_page = FansPage(
-            controller,
-            activity_service=activity_service,
-            settings_service=settings_service,
-        )
-        self.fans_page.settings_requested.connect(self._open_settings_dialog)
         self.processes_page = ProcessesPage(
             controller,
             activity_service=activity_service,
