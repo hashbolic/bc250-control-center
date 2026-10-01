@@ -214,7 +214,6 @@ class ControlCenterWindow(QMainWindow):
             "gpu": self.gpu_page,
             "cu": self.cu_page,
             "performance": self.performance_page,
-            "fans": self.fans_page,
             "processes": self.processes_page,
             "firmware": self.firmware_page,
         }
