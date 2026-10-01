@@ -220,9 +220,8 @@ class DashboardPage(QWidget):
             ("bios", "Version", "BIOS"),
         ):
             self.fan_card.details.add(key, label, group=group)
-        self.fan_card.add_action("Fan Control")
-        self.fan_card.add_action("Automatic curve", action="fans_curve")
-
+        # Cooling stays on the dashboard as telemetry only.  Fan ownership is
+        # intentionally delegated to CoolerControl in the BC250 appliance image.
         self.instruments = (self.cpu_card, self.gpu_card, self.fan_card)
         self.modules_host = QWidget()
         self.modules_grid = QGridLayout(self.modules_host)
@@ -230,7 +229,7 @@ class DashboardPage(QWidget):
         self.modules_grid.setHorizontalSpacing(12)
         self.modules_grid.setVerticalSpacing(12)
         self.main_layout.addWidget(self.modules_host)
-        for panel in self.instruments:
+        for panel in (self.cpu_card, self.gpu_card):
             panel.activated.connect(self._open_module)
             panel.action_requested.connect(self.action_requested)
 
