@@ -1058,39 +1058,18 @@ class Plugin:
         return self._record_action("cu", "service-remove", result)
 
     async def apply_system_fan_preset(self, preset: str) -> dict:
-        if preset not in FAN_PRESETS:
-            return {"ok": False, "error": "Unsupported system-fan preset."}
-        result = await self._run_single_operation("fan-system", preset, timeout=30)
-        return self._record_action("fan", preset, result)
+        del preset
+        return {
+            "ok": False,
+            "error": "Fan control is delegated to CoolerControl; BC250 Control Center is monitoring-only.",
+        }
 
     async def apply_fan_channel(self, channel: int, target: int | str) -> dict:
-        """Apply one temporary setting without exposing a generic root argv."""
-        if isinstance(channel, bool) or type(channel) not in {int, str}:
-            return {"ok": False, "error": "Unsupported Quick Access fan channel."}
-        try:
-            normalized_channel = int(channel)
-        except (TypeError, ValueError, OverflowError):
-            return {"ok": False, "error": "Unsupported Quick Access fan channel."}
-        if str(normalized_channel) != str(channel) or normalized_channel not in FAN_CHANNELS:
-            return {"ok": False, "error": "Unsupported Quick Access fan channel."}
-
-        if target == "automatic":
-            normalized_target = "automatic"
-        else:
-            if isinstance(target, bool) or type(target) not in {int, str}:
-                return {"ok": False, "error": "Fan speed must be Automatic or 20–100%."}
-            try:
-                percent = int(target)
-            except (TypeError, ValueError, OverflowError):
-                return {"ok": False, "error": "Fan speed must be Automatic or 20–100%."}
-            if str(percent) != str(target) or not FAN_MIN_PERCENT <= percent <= FAN_MAX_PERCENT:
-                return {"ok": False, "error": "Fan speed must be Automatic or 20–100%."}
-            normalized_target = str(percent)
-
-        result = await self._run_single_operation(
-            "fan-channel", str(normalized_channel), normalized_target, timeout=30,
-        )
-        return self._record_action("fan", f"pwm{normalized_channel}:{normalized_target}", result)
+        del channel, target
+        return {
+            "ok": False,
+            "error": "Fan control is delegated to CoolerControl; BC250 Control Center is monitoring-only.",
+        }
 
     async def apply_saved_cpu_profile(self) -> dict:
         result = await self._run_single_operation("cpu-apply-saved", timeout=920)
@@ -1187,6 +1166,8 @@ class Plugin:
             return {"ok": False, "error": "Unsupported game id."}
         gpu = gpu or None
         fan = fan or None
+        if fan is not None:
+            return {"ok": False, "error": "Per-game fan control is disabled; CoolerControl owns fan PWM."}
         if gpu is not None and gpu not in GPU_PROFILES:
             return {"ok": False, "error": "Unsupported GPU Quick Access profile."}
         if fan is not None and fan not in GAME_FAN_PRESETS:
