@@ -821,6 +821,18 @@ class DependenciasRepository:
             self._component_capabilities(os_info),
             installed_components,
         )
+        if appliance_mode:
+            for key in ('runtime', 'governor', 'cpu_oc', 'core_unlock', 'fan_pwm'):
+                if key in component_capabilities:
+                    component_capabilities[key]['appliance_managed'] = True
+                    component_capabilities[key]['detail'] = (
+                        'Preconfigured by the BC250 Console image.'
+                    )
+            for key in ('umr', 'cu_manager'):
+                if key in component_capabilities:
+                    component_capabilities[key]['detail'] = (
+                        'Left manual on purpose; CU qualification is board-specific.'
+                    )
         resultado = {
             'governor_cmd': governor_probe['command'],
             'governor_pkg': bool(governor_probe['command']),
