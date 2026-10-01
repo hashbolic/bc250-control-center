@@ -310,7 +310,6 @@ class Sidebar(QFrame):
             ("gpu", "GPU Governor", "nav_gpu", "purple_soft"),
             ("cu", "Compute Units", "nav_compute", "orange_soft"),
             ("performance", "Performance", "nav_performance", "purple_soft"),
-            ("fans", "Fans", "nav_fans", "cyan_soft"),
             ("processes", "Processes", "nav_processes", "blue_soft"),
             ("firmware", "Firmware (BIOS)", "nav_firmware", "orange_soft"),
             ("settings", "Settings", "nav_settings", "blue_soft"),
